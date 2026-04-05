@@ -28,56 +28,59 @@ use TextLK\SMS\TextLKSMSMessage;
 */
 class SalesEntryController extends Controller
 {
-    public function index(Request $request): JsonResponse
-    {
-        try {
-            $currentUser = auth()->user();
+   public function index(Request $request): JsonResponse
+{
+    try {
+        $currentUser = auth()->user();
 
-            Log::info('SalesEntryController@index called', [
-                'db_id' => $currentUser?->id,
-                'user_id' => $currentUser?->user_id, // This is the important one!
-                'name' => $currentUser?->name,
-                'role' => $currentUser?->role,
-            ]);
-
-            // Base query
-            $query = Sale::with(['customer']);
-
-            // 🔐 Apply User filter
-            if ($currentUser && $currentUser->role === 'User') {
-                // Filter by user_id field (which should be 'pos12345')
-                $query->where('UniqueCode', $currentUser->user_id);
-            }
-
-            $sales = $query->get();
-
-            Log::info('SalesEntryController@index: Query successful', [
-                'total_sales' => $sales->count(),
-                'filtered_by' => $currentUser?->role === 'User' ? $currentUser->user_id : 'none',
-                'matching_records_found' => $sales->where('UniqueCode', $currentUser?->user_id)->count(),
-            ]);
-
-            $printedSales = $sales->where('bill_printed', 'Y')->values();
-            $unprintedSales = $sales->where('bill_printed', 'N')->values();
-
-            return response()->json([
-                'sales' => $sales,
-                'printed_sales' => $printedSales,
-                'unprinted_sales' => $unprintedSales,
-            ]);
-
-        } catch (\Exception $e) {
-            Log::error('SalesEntryController@index FAILED', [
-                'message' => $e->getMessage(),
-                'file' => $e->getFile(),
-                'line' => $e->getLine(),
-            ]);
-
-            return response()->json([
-                'error' => 'Failed to fetch sales data.'
-            ], 500);
+        if (!$currentUser) {
+            return response()->json(['error' => 'Unauthorized'], 401);
         }
+
+        Log::info('SalesEntryController@index called', [
+            'db_id' => $currentUser->id,
+            'user_id' => $currentUser->user_id,
+            'role' => $currentUser->role,
+        ]);
+
+        // ✅ Start query
+        $query = Sale::with(['customer']);
+
+        // 🔐 Apply filter ONLY for role = User
+        if ($currentUser->role === 'User') {
+            $query->where('UniqueCode', $currentUser->user_id);
+        }
+
+        // ✅ Execute query AFTER filtering
+        $sales = $query->get();
+
+        // ✅ Separate printed/unprinted (AFTER DB filtering)
+        $printedSales = $sales->where('bill_printed', 'Y')->values();
+        $unprintedSales = $sales->where('bill_printed', 'N')->values();
+
+        Log::info('SalesEntryController@index result', [
+            'total_sales' => $sales->count(),
+            'user_filter_applied' => $currentUser->role === 'User',
+            'filtered_user_id' => $currentUser->user_id,
+        ]);
+
+        return response()->json([
+            'sales' => $sales,
+            'printed_sales' => $printedSales,
+            'unprinted_sales' => $unprintedSales,
+        ]);
+
+    } catch (\Exception $e) {
+        Log::error('SalesEntryController@index FAILED', [
+            'message' => $e->getMessage(),
+            'line' => $e->getLine(),
+        ]);
+
+        return response()->json([
+            'error' => 'Failed to fetch sales data.'
+        ], 500);
     }
+}
     public function create()
     {
         $suppliers = Supplier::all();
@@ -180,174 +183,231 @@ class SalesEntryController extends Controller
             'itemsWithPackCost'
         ));
     }
-    public function store(Request $request)
-    {
-        $validated = $request->validate([
-            'supplier_code' => 'required|string|max:255',
-            'customer_code' => 'required|string|max:255',
-            'customer_name' => 'nullable|string|max:255',
-            'item_code' => 'required|string|exists:items,no',
-            'item_name' => 'required|string|max:255',
-            'weight' => 'required|numeric',
-            'price_per_kg' => 'required|numeric',
-            'pack_due' => 'nullable|numeric',
-            'total' => 'required|numeric',
-            'packs' => 'required|numeric',
-            'given_amount' => 'nullable|numeric',
-            'bill_no' => 'nullable|string|max:255',
-            'bill_printed' => 'nullable|string|in:N,Y',
-        ]);
+   public function store(Request $request)
+{
+    $validated = $request->validate([
+        'supplier_code' => 'required|string|max:255',
+        'customer_code' => 'required|string|max:255',
+        'customer_name' => 'nullable|string|max:255',
+        'item_code' => 'required|string|exists:items,no',
+        'item_name' => 'required|string|max:255',
+        'weight' => 'required|numeric',
+        'price_per_kg' => 'required|numeric',
+        'pack_due' => 'nullable|numeric',
+        'total' => 'required|numeric',
+        'packs' => 'required|numeric',
+        'given_amount' => 'nullable|numeric',
+        'bill_no' => 'nullable|string|max:255',
+        'bill_printed' => 'nullable|string|in:N,Y',
+    ]);
 
-        try {
-            DB::beginTransaction();
+    try {
+        DB::beginTransaction();
 
-            // 1. Fetch Item details
-            $item = Item::where('no', $validated['item_code'])->first();
-            if (!$item) {
-                return response()->json(['error' => 'Item not found.'], 422);
+        $item = Item::where('no', $validated['item_code'])->first();
+        if (!$item) {
+            return response()->json(['error' => 'Item not found.'], 422);
+        }
+
+        // --- CALCULATION LOGIC ---
+        $bagWeightPerUnit = (float) ($item->bag_real_price ?? 0);
+        $numPacks = (int) $validated['packs'];
+        $pricePerKg = (float) $validated['price_per_kg'];
+
+        $totalBagWeight = $bagWeightPerUnit * $numPacks;
+        $incomingNetWeight = (float) $validated['weight'] - $totalBagWeight;
+        $recalculatedIncomingTotal = $incomingNetWeight * $pricePerKg;
+
+        // --- KULIYA CALCULATION (NEW RECORD) ---
+        $kuliya = 0;
+
+        if (str_starts_with($validated['item_code'], '/')) {
+            $kuliya = 50;
+        } elseif (str_contains($validated['item_name'], 'කෙසෙල්')) {
+            $kuliya = 150;
+        } else {
+            $weight = $incomingNetWeight;
+
+            if ($weight >= 1 && $weight <= 9) {
+                $kuliya = 0;
+            } elseif ($weight >= 10 && $weight <= 19) {
+                $kuliya = 20;
+            } elseif ($weight >= 20 && $weight <= 49) {
+                $kuliya = 40;
+            } elseif ($weight >= 50 && $weight <= 99) {
+                $kuliya = 50;
+            } elseif ($weight >= 100) {
+                $kuliya = $weight; // ✅ NEW RULE
             }
+        }
 
-            // --- CALCULATION LOGIC ---
-            $bagWeightPerUnit = (float) ($item->bag_real_price ?? 0);
-            $numPacks = (int) $validated['packs'];
-            $pricePerKg = (float) $validated['price_per_kg'];
+        $billPrinted = $validated['bill_printed'] ?? null;
 
-            // Total Bag Weight to subtract
-            $totalBagWeight = $bagWeightPerUnit * $numPacks;
+        $currentEntry = [
+            'time' => now('Asia/Colombo')->format('h:i A'),
+            'weight' => (float) $validated['weight'],
+            'packs' => $numPacks
+        ];
 
-            // Net Weight for this specific entry
-            $incomingNetWeight = (float) $validated['weight'] - $totalBagWeight;
+        $shouldCheckForUpdate =
+            ($billPrinted === null || $billPrinted === 'N') &&
+            $pricePerKg == 0;
 
-            // Recalculate Total based on Net Weight (Price * Net Weight)
-            // If price is 0 (unpriced items), total remains 0.
-            $recalculatedIncomingTotal = $incomingNetWeight * $pricePerKg;
-            // -------------------------
+        if ($shouldCheckForUpdate) {
+            $existingSale = Sale::where('customer_code', strtoupper($validated['customer_code']))
+                ->where('item_code', $validated['item_code'])
+                ->where('supplier_code', $validated['supplier_code'])
+                ->where(function ($query) {
+                    $query->where('bill_printed', 'N')->orWhereNull('bill_printed');
+                })
+                ->where('price_per_kg', 0)
+                ->where('Processed', 'N')
+                ->orderBy('created_at', 'desc')
+                ->first();
 
-            $billPrinted = $validated['bill_printed'] ?? null;
-            $currentEntry = [
-                'time' => now('Asia/Colombo')->format('h:i A'),
-                'weight' => (float) $validated['weight'],
-                'packs' => $numPacks
-            ];
+            if ($existingSale) {
+                $newWeight = $existingSale->weight + $incomingNetWeight;
+                $newPacks = $existingSale->packs + $numPacks;
 
-            $shouldCheckForUpdate =
-                ($billPrinted === null || $billPrinted === 'N') &&
-                $pricePerKg == 0;
+                $newTotal = $newWeight * 0;
 
-            if ($shouldCheckForUpdate) {
-                $existingSale = Sale::where('customer_code', strtoupper($validated['customer_code']))
-                    ->where('item_code', $validated['item_code'])
-                    ->where('supplier_code', $validated['supplier_code'])
-                    ->where(function ($query) {
-                        $query->where('bill_printed', 'N')->orWhereNull('bill_printed');
-                    })
-                    ->where('price_per_kg', 0)
-                    ->where('Processed', 'N')
-                    ->orderBy('created_at', 'desc')
-                    ->first();
+                // --- KULIYA CALCULATION (UPDATE CASE) ---
+                $updatedKuliya = 0;
 
-                if ($existingSale) {
-                    $newWeight = $existingSale->weight + $incomingNetWeight;
-                    $newPacks = $existingSale->packs + $numPacks;
-
-                    // Since price_per_kg is 0 for these updates, total remains 0
-                    $newTotal = $newWeight * 0;
-
-                    $history = $existingSale->breakdown_history;
-                    if (is_string($history)) {
-                        $history = json_decode($history, true);
+                if (str_starts_with($validated['item_code'], '/')) {
+                    $updatedKuliya = 50;
+                } elseif (str_contains($validated['item_name'], 'කෙසෙල්')) {
+                    $updatedKuliya = 150;
+                } else {
+                    if ($newWeight >= 1 && $newWeight <= 9) {
+                        $updatedKuliya = 0;
+                    } elseif ($newWeight >= 10 && $newWeight <= 19) {
+                        $updatedKuliya = 20;
+                    } elseif ($newWeight >= 20 && $newWeight <= 49) {
+                        $updatedKuliya = 40;
+                    } elseif ($newWeight >= 50 && $newWeight <= 99) {
+                        $updatedKuliya = 50;
+                    } elseif ($newWeight >= 100) {
+                        $updatedKuliya = $newWeight; // ✅ NEW RULE
                     }
-                    if (!is_array($history)) {
-                        $history = [['time' => $existingSale->created_at->format('h:i A'), 'weight' => (float) $existingSale->weight, 'packs' => (int) $existingSale->packs]];
-                    }
-                    $history[] = $currentEntry;
-
-                    $existingSale->update([
-                        'weight' => $newWeight,
-                        'packs' => $newPacks,
-                        'total' => $newTotal, // Updated Total
-                        'SupplierTotal' => 0,
-                        'profit' => 0,
-                        'breakdown_history' => $history,
-                        'bag_real_weight' => $bagWeightPerUnit,
-                        'updated_at' => now(),
-                    ]);
-
-                    DB::commit();
-                    return response()->json(['success' => true, 'message' => 'Existing record updated', 'data' => $existingSale->fresh()]);
                 }
-            }
 
-            // ---------- COMMISSION & PROFIT LOGIC ----------
-            $commissionAmount = 0.00;
-            $commissionRule = Commission::where('item_code', $validated['item_code'])
+                $history = $existingSale->breakdown_history;
+                if (is_string($history)) {
+                    $history = json_decode($history, true);
+                }
+                if (!is_array($history)) {
+                    $history = [[
+                        'time' => $existingSale->created_at->format('h:i A'),
+                        'weight' => (float) $existingSale->weight,
+                        'packs' => (int) $existingSale->packs
+                    ]];
+                }
+
+                $history[] = $currentEntry;
+
+                $existingSale->update([
+                    'weight' => $newWeight,
+                    'packs' => $newPacks,
+                    'total' => $newTotal,
+                    'SupplierTotal' => 0,
+                    'profit' => 0,
+                    'breakdown_history' => $history,
+                    'bag_real_weight' => $bagWeightPerUnit,
+                    'Kuliya' => $updatedKuliya,
+                    'updated_at' => now(),
+                ]);
+
+                DB::commit();
+                return response()->json([
+                    'success' => true,
+                    'message' => 'Existing record updated',
+                    'data' => $existingSale->fresh()
+                ]);
+            }
+        }
+
+        // ---------- COMMISSION & PROFIT ----------
+        $commissionAmount = 0.00;
+
+        $commissionRule = Commission::where('item_code', $validated['item_code'])
+            ->where('starting_price', '<=', $pricePerKg)
+            ->where('end_price', '>=', $pricePerKg)
+            ->first()
+            ?? Commission::where('supplier_code', $validated['supplier_code'])
+                ->where('starting_price', '<=', $pricePerKg)
+                ->where('end_price', '>=', $pricePerKg)
+                ->first()
+            ?? Commission::where('type', 'Z')
                 ->where('starting_price', '<=', $pricePerKg)
                 ->where('end_price', '>=', $pricePerKg)
                 ->first();
 
-            if (!$commissionRule) {
-                $commissionRule = Commission::where('supplier_code', $validated['supplier_code'])->where('starting_price', '<=', $pricePerKg)->where('end_price', '>=', $pricePerKg)->first();
-            }
-            if (!$commissionRule) {
-                $commissionRule = Commission::where('type', 'Z')->where('starting_price', '<=', $pricePerKg)->where('end_price', '>=', $pricePerKg)->first();
-            }
-            if ($commissionRule) {
-                $commissionAmount = $commissionRule->commission_amount;
-            }
-
-            $customerPackCost = $item->pack_cost ?? 0;
-            $customerPackLabour = $item->pack_due ?? 0;
-
-            $supplierPricePerKg = abs($pricePerKg - $commissionAmount);
-
-            // Final calculations for NEW sale
-            $supplierTotal = $incomingNetWeight * $supplierPricePerKg;
-            $profit = $recalculatedIncomingTotal - $supplierTotal;
-
-            $settingDate = Setting::value('value') ?? now()->toDateString();
-
-            // ---------- CREATE NEW SALE ----------
-            $sale = Sale::create([
-                'supplier_code' => $validated['supplier_code'],
-                'customer_code' => strtoupper($validated['customer_code']),
-                'customer_name' => $validated['customer_name'],
-                'item_code' => $validated['item_code'],
-                'item_name' => $validated['item_name'],
-                'weight' => $incomingNetWeight,
-                'price_per_kg' => $pricePerKg,
-                'pack_due' => $validated['pack_due'] ?? 0,
-                'total' => $recalculatedIncomingTotal, // RECACLULATED TOTAL HERE
-                'packs' => $numPacks,
-                'CustomerPackCost' => $customerPackCost,
-                'CustomerPackLabour' => $customerPackLabour,
-                'SupplierWeight' => $incomingNetWeight,
-                'SupplierPricePerKg' => $supplierPricePerKg,
-                'SupplierTotal' => $supplierTotal,
-                'SupplierPackCost' => $customerPackCost,
-                'SupplierPackLabour' => $customerPackLabour,
-                'profit' => $profit,
-                'breakdown_history' => [$currentEntry],
-                'Processed' => 'N',
-                'CustomerBillEnteredOn' => now(),
-                'UniqueCode' => auth()->user()->user_id,
-                'Date' => $settingDate,
-                'ip_address' => $request->ip(),
-                'given_amount' => $validated['given_amount'],
-                'bill_printed' => $billPrinted,
-                'bill_no' => $validated['bill_no'] ?? null,
-                'commission_amount' => $commissionAmount,
-                'bag_real_weight' => $bagWeightPerUnit,
-            ]);
-
-            DB::commit();
-            return response()->json(['success' => true, 'message' => 'New record created with updated total', 'data' => $sale->fresh()]);
-
-        } catch (\Exception $e) {
-            DB::rollBack();
-            Log::error('Sales Entry Failed: ' . $e->getMessage());
-            return response()->json(['error' => 'Failed: ' . $e->getMessage()], 422);
+        if ($commissionRule) {
+            $commissionAmount = $commissionRule->commission_amount;
         }
+
+        $customerPackCost = $item->pack_cost ?? 0;
+        $customerPackLabour = $item->pack_due ?? 0;
+
+        $supplierPricePerKg = abs($pricePerKg - $commissionAmount);
+
+        $supplierTotal = $incomingNetWeight * $supplierPricePerKg;
+        $profit = $recalculatedIncomingTotal - $supplierTotal;
+
+        $settingDate = Setting::value('value') ?? now()->toDateString();
+
+        // ---------- CREATE NEW SALE ----------
+        $sale = Sale::create([
+            'supplier_code' => $validated['supplier_code'],
+            'customer_code' => strtoupper($validated['customer_code']),
+            'customer_name' => $validated['customer_name'],
+            'item_code' => $validated['item_code'],
+            'item_name' => $validated['item_name'],
+            'weight' => $incomingNetWeight,
+            'price_per_kg' => $pricePerKg,
+            'pack_due' => $validated['pack_due'] ?? 0,
+            'total' => $recalculatedIncomingTotal,
+            'packs' => $numPacks,
+            'CustomerPackCost' => $customerPackCost,
+            'CustomerPackLabour' => $customerPackLabour,
+            'SupplierWeight' => $incomingNetWeight,
+            'SupplierPricePerKg' => $supplierPricePerKg,
+            'SupplierTotal' => $supplierTotal,
+            'SupplierPackCost' => $customerPackCost,
+            'SupplierPackLabour' => $customerPackLabour,
+            'profit' => $profit,
+            'breakdown_history' => [$currentEntry],
+            'Processed' => 'N',
+            'CustomerBillEnteredOn' => now(),
+            'UniqueCode' => auth()->user()->user_id,
+            'Date' => $settingDate,
+            'ip_address' => $request->ip(),
+            'given_amount' => $validated['given_amount'],
+            'bill_printed' => $billPrinted,
+            'bill_no' => $validated['bill_no'] ?? null,
+            'commission_amount' => $commissionAmount,
+            'bag_real_weight' => $bagWeightPerUnit,
+            'Kuliya' => $kuliya,
+        ]);
+
+        DB::commit();
+
+        return response()->json([
+            'success' => true,
+            'message' => 'New record created with updated total',
+            'data' => $sale->fresh()
+        ]);
+
+    } catch (\Exception $e) {
+        DB::rollBack();
+        Log::error('Sales Entry Failed: ' . $e->getMessage());
+
+        return response()->json([
+            'error' => 'Failed: ' . $e->getMessage()
+        ], 422);
     }
+}
     public function markAllAsProcessed(Request $request)
     {
         try {
@@ -439,7 +499,7 @@ class SalesEntryController extends Controller
 
             // 4. ✅ CREATE PUBLIC BILL LINK
             $token = Str::random(40);
-            $baseUrl = env('APP_FRONTEND_URL', 'https://goviraju.lk/sms_new_frontend_50500/');
+            $baseUrl = env('APP_FRONTEND_URL', 'https://goviraju.lk/DBS_30500/');
             $publicUrl = rtrim($baseUrl, '/') . "/view-bill/" . $token;
 
             DB::table('bill_links')->insert([
@@ -782,86 +842,86 @@ class SalesEntryController extends Controller
         }
     }
 
-   public function destroy(Sale $sale)
-{
-    try {
-        // 1. Get setting date safely
-        $settingDate = Setting::value('value') ?? now();
-        $formattedDate = Carbon::parse($settingDate)->format('Y-m-d');
+    public function destroy(Sale $sale)
+    {
+        try {
+            // 1. Get setting date safely
+            $settingDate = Setting::value('value') ?? now();
+            $formattedDate = Carbon::parse($settingDate)->format('Y-m-d');
 
-        // Check if the bill was printed to handle adjustments and SMS
-        if ($sale->bill_printed === 'Y') {
+            // Check if the bill was printed to handle adjustments and SMS
+            if ($sale->bill_printed === 'Y') {
 
-            // --- A. Log to Salesadjustment Table ---
-            $adjustmentData = [
-                'customer_code' => $sale->customer_code,
-                'supplier_code' => $sale->supplier_code,
-                'code' => $sale->item_code,
-                'item_code' => $sale->item_code,
-                'item_name' => $sale->item_name,
-                'weight' => $sale->weight,
-                'price_per_kg' => $sale->price_per_kg,
-                'total' => $sale->total,
-                'packs' => $sale->packs,
-                'bill_no' => $sale->bill_no,
-                'original_created_at' => $sale->created_at,
-                'Date' => $formattedDate,
-            ];
+                // --- A. Log to Salesadjustment Table ---
+                $adjustmentData = [
+                    'customer_code' => $sale->customer_code,
+                    'supplier_code' => $sale->supplier_code,
+                    'code' => $sale->item_code,
+                    'item_code' => $sale->item_code,
+                    'item_name' => $sale->item_name,
+                    'weight' => $sale->weight,
+                    'price_per_kg' => $sale->price_per_kg,
+                    'total' => $sale->total,
+                    'packs' => $sale->packs,
+                    'bill_no' => $sale->bill_no,
+                    'original_created_at' => $sale->created_at,
+                    'Date' => $formattedDate,
+                ];
 
-            Salesadjustment::create($adjustmentData + ['type' => 'original']);
-            Salesadjustment::create($adjustmentData + ['type' => 'deleted']);
+                Salesadjustment::create($adjustmentData + ['type' => 'original']);
+                Salesadjustment::create($adjustmentData + ['type' => 'deleted']);
 
-            // --- B. Send Deleted Notification SMS ---
-            try {
-                $adminPhone = '94702758908';
-                $now = now()->format('Y-m-d H:i');
+                // --- B. Send Deleted Notification SMS ---
+                try {
+                    $adminPhone = '94702758908';
+                    $now = now()->format('Y-m-d H:i');
 
-                $messageBody = "❌ PRINTED SALE DELETED\n" .
-                    "Time: {$now}\n" .
-                    "Bill: " . ($sale->bill_no ?? 'N/A') . "\n" .
-                    "Cust: {$sale->customer_code}\n" .
-                    "Item: {$sale->item_code}\n" .
-                    "Wt: {$sale->weight}, Pk: {$sale->packs}\n" .
-                    "Price: {$sale->price_per_kg}, Tot: {$sale->total}";
+                    $messageBody = "❌ PRINTED SALE DELETED\n" .
+                        "Time: {$now}\n" .
+                        "Bill: " . ($sale->bill_no ?? 'N/A') . "\n" .
+                        "Cust: {$sale->customer_code}\n" .
+                        "Item: {$sale->item_code}\n" .
+                        "Wt: {$sale->weight}, Pk: {$sale->packs}\n" .
+                        "Price: {$sale->price_per_kg}, Tot: {$sale->total}";
 
-                $textLKSMS = new \TextLK\SMS\TextLKSMSMessage();
-                $textLKSMS->recipient($adminPhone)
-                    ->message($messageBody)
-                    ->senderId(env('TEXTLK_SENDER_ID', 'TextLKDemo'))
-                    ->apiKey(env('TEXTLK_API_KEY'))
-                    ->send();
+                    $textLKSMS = new \TextLK\SMS\TextLKSMSMessage();
+                    $textLKSMS->recipient($adminPhone)
+                        ->message($messageBody)
+                        ->senderId(env('TEXTLK_SENDER_ID', 'TextLKDemo'))
+                        ->apiKey(env('TEXTLK_API_KEY'))
+                        ->send();
 
-                Log::info("Deletion SMS sent for Printed Sale ID: " . $sale->id);
+                    Log::info("Deletion SMS sent for Printed Sale ID: " . $sale->id);
 
-            } catch (\Exception $smsEx) {
-                // We catch SMS errors separately so the DB deletion still happens
-                Log::error("Deletion SMS Failed: " . $smsEx->getMessage());
+                } catch (\Exception $smsEx) {
+                    // We catch SMS errors separately so the DB deletion still happens
+                    Log::error("Deletion SMS Failed: " . $smsEx->getMessage());
+                }
             }
+
+            // 2. Perform actual deletion and update stock
+            $saleCode = $sale->code;
+            $sale->delete();
+            $this->updateGrnRemainingStock($saleCode);
+
+            return response()->json([
+                'success' => true,
+                'message' => 'Sales record deleted successfully.'
+            ]);
+
+        } catch (\Exception $e) {
+            Log::error('Error deleting sale', [
+                'sale_id' => $sale->id ?? null,
+                'error' => $e->getMessage(),
+            ]);
+
+            return response()->json([
+                'success' => false,
+                'message' => 'An error occurred while deleting the sale.',
+                'error' => $e->getMessage(),
+            ], 500);
         }
-
-        // 2. Perform actual deletion and update stock
-        $saleCode = $sale->code;
-        $sale->delete();
-        $this->updateGrnRemainingStock($saleCode);
-
-        return response()->json([
-            'success' => true,
-            'message' => 'Sales record deleted successfully.'
-        ]);
-
-    } catch (\Exception $e) {
-        Log::error('Error deleting sale', [
-            'sale_id' => $sale->id ?? null,
-            'error' => $e->getMessage(),
-        ]);
-
-        return response()->json([
-            'success' => false,
-            'message' => 'An error occurred while deleting the sale.',
-            'error' => $e->getMessage(),
-        ], 500);
     }
-}
 
 
     public function updateGrnRemainingStock(): void
@@ -1181,6 +1241,35 @@ class SalesEntryController extends Controller
 
         return response()->json($bill);
     }
+    public function bulkUpdateSupplier(Request $request)
+{
+    try {
+        $validated = $request->validate([
+            'sale_ids' => 'required|array',
+            'sale_ids.*' => 'exists:sales,id',
+            'supplier_code' => 'required|string|max:255'
+        ]);
+
+        $updatedSales = [];
+        foreach ($validated['sale_ids'] as $saleId) {
+            $sale = Sale::find($saleId);
+            $sale->supplier_code = strtoupper($validated['supplier_code']);
+            $sale->save();
+            $updatedSales[] = $sale;
+        }
+
+        return response()->json([
+            'success' => true,
+            'sales' => $updatedSales,
+            'message' => count($updatedSales) . ' records updated successfully'
+        ]);
+    } catch (\Exception $e) {
+        return response()->json([
+            'success' => false,
+            'message' => $e->getMessage()
+        ], 500);
+    }
+}
 
 
 

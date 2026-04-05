@@ -32,7 +32,7 @@ Route::get('/items/options', [CommissionController::class, 'getItemOptions']);
 // ✅ PROTECTED ROUTES (Requires 'auth:sanctum') 
 // ----------------------------------------------------------------------
 Route::middleware('auth:sanctum')->group(function () {
-
+    Route::put('/sales/bulk-update-supplier', [SupplierController::class, 'bulkUpdateSupplier']);
     // CUSTOMERS
     Route::get('/suppliers/loan-summary', [SupplierLoanController::class, 'getLoanTakenSummary']);
     Route::get('/customers', [CustomerController::class, 'apiIndex']);
@@ -236,3 +236,6 @@ Route::get('/farmer-loans/balance/{code}', [FarmerLoanController::class, 'getFar
 Route::get('/supplier-loan/search', [SupplierLoanController::class, 'findLoan']);
 Route::get('/supplier-loans/report', [SupplierLoanController::class, 'getReport']);
 Route::post('/suppliers/delete-loan-record', [SupplierLoanController::class, 'deleteLoanRecord']);
+//bulk update in sales entry page
+Route::post('/sales/bulk-update-supplier', [SalesEntryController::class, 'bulkUpdateSupplier']);
+//bulk update supplier

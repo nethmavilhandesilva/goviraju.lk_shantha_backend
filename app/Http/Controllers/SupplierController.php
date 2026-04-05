@@ -782,6 +782,37 @@ private function sendReprintSMS($data, $records, $token)
         throw $e;
     }
 }
+public function bulkUpdateSupplier(Request $request)
+{
+    $validated = $request->validate([
+        'transaction_ids' => 'required|array',
+        'transaction_ids.*' => 'exists:sales,id',
+        'supplier_code'   => 'required|string',
+        'customer_code'   => 'nullable|string'
+    ]);
+
+    try {
+        $updateData = [
+            'supplier_code' => strtoupper($validated['supplier_code']),
+        ];
+
+        if ($request->filled('customer_code')) {
+            $updateData['customer_code'] = strtoupper($validated['customer_code']);
+        }
+
+        // Mass update all IDs sent from React
+        $updatedCount = Sale::whereIn('id', $validated['transaction_ids'])
+            ->update($updateData);
+
+        return response()->json([
+            'message' => 'ගනුදෙනු ' . $updatedCount . ' ක් යාවත්කාලීන කරන ලදී.',
+            'updated_count' => $updatedCount
+        ], 200);
+
+    } catch (\Exception $e) {
+        return response()->json(['error' => $e->getMessage()], 500);
+    }
+}
  
 
 }

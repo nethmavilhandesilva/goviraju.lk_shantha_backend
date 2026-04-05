@@ -55,6 +55,7 @@ class Sale extends Model
         'credit_transaction',
         'loan_amount',
         'loan_taken',
+        'Kuliya',
     ];
     protected $casts = [
     'breakdown_history' => 'array',

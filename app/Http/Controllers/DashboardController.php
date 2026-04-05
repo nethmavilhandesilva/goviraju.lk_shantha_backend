@@ -57,54 +57,89 @@ class DashboardController extends Controller
         )
     );
 }
- public function getAllSalesData()
-    {
-        // 1. Fetch all sales from the database
-        // It's best practice to select only the columns the frontend needs (id, bill_printed, total, customer_code, etc.)
-        $allSales = Sale::select([
-            'id', 
-            'bill_printed', 
-            'customer_code', 
-            'customer_name', 
-            'supplier_code', 
-            'code', 
-            'item_code', 
-            'item_name', 
-            'weight', 
-            'price_per_kg', 
-            'pack_due', 
-            'total', 
-            'packs', 
-            'grn_entry_code', 
-            'original_weight', 
-            'original_packs', 
-            'given_amount', 
-            'bill_no'
-            // Add any other required fields
-        ])->get();
+public function salesReport(Request $request)
+{
+    // Log all incoming parameters
+    \Log::info('Sales Report Request:', [
+        'all_params' => $request->all(),
+        'transaction_type' => $request->transaction_type,
+        'bill_status' => $request->bill_status,
+        'start_date' => $request->start_date,
+        'end_date' => $request->end_date,
+        'supplier_code' => $request->supplier_code,
+        'item_code' => $request->item_code,
+        'customer_code' => $request->customer_code,
+        'bill_no' => $request->bill_no
+    ]);
 
-        // 2. Separate them into the three required arrays based on 'bill_printed' status
-        $response = [
-            'sales' => [], // Corresponds to new/initial sales (bill_printed is NULL or not 'Y'/'N')
-            'printed' => [], // Corresponds to printed sales ('Y')
-            'unprinted' => [], // Corresponds to unprinted sales ('N')
-        ];
+    // Your existing logic...
+    $useHistory = $request->filled('start_date') || $request->filled('end_date');
 
-        foreach ($allSales as $sale) {
-            // Note: In your SalesEntry.jsx, 'newSales' is defined as: 
-            // allSales.filter(s => s.id && s.bill_printed !== 'Y' && s.bill_printed !== 'N')
-            
-            if ($sale->bill_printed === 'Y') {
-                $response['printed'][] = $sale;
-            } elseif ($sale->bill_printed === 'N') {
-                $response['unprinted'][] = $sale;
-            } else {
-                // This captures records where bill_printed is NULL or any other value
-                $response['sales'][] = $sale; 
-            }
-        }
+    $query = $useHistory
+        ? SalesHistory::query()
+        : Sale::query();
 
-        // 3. Return the data structure that the frontend's fetchAllSales function expects
-        return response()->json($response);
+    $query->where('Processed', 'Y');
+
+    // Apply filters...
+    if ($request->filled('supplier_code')) {
+        $query->where('supplier_code', $request->supplier_code);
     }
+
+    if ($request->filled('item_code')) {
+        $query->where('item_code', $request->item_code);
+    }
+
+    if ($request->filled('customer_code')) {
+        $query->where('customer_code', $request->customer_code);
+    }
+
+    if ($request->filled('bill_no')) {
+        $query->where('bill_no', $request->bill_no);
+    }
+
+    // New filter for transaction type (Credit/Cash)
+    if ($request->filled('transaction_type')) {
+        \Log::info('Applying transaction_type filter:', ['value' => $request->transaction_type]);
+        
+        if ($request->transaction_type === 'credit') {
+            $query->where('credit_transaction', 'Y');
+        } elseif ($request->transaction_type === 'cash') {
+            $query->where('credit_transaction', 'N');
+        }
+    }
+
+    // New filter for bill printed status
+    if ($request->filled('bill_status')) {
+        \Log::info('Applying bill_status filter:', ['value' => $request->bill_status]);
+        
+        if ($request->bill_status === 'printed') {
+            $query->where('bill_printed', 'Y');
+        } elseif ($request->bill_status === 'not_printed') {
+            $query->where('bill_printed', 'N');
+        }
+    }
+
+    if ($request->filled('start_date') && $request->filled('end_date')) {
+        $query->whereBetween('Date', [$request->start_date, $request->end_date]);
+    } elseif ($request->filled('start_date')) {
+        $query->where('Date', '>=', $request->start_date);
+    } elseif ($request->filled('end_date')) {
+        $query->where('Date', '<=', $request->end_date);
+    }
+
+    $query->orderBy('id', 'DESC');
+    
+    // Log the SQL query for debugging
+    \Log::info('SQL Query:', ['sql' => $query->toSql(), 'bindings' => $query->getBindings()]);
+    
+    $salesData = $query->get();
+    
+    \Log::info('Records found:', ['count' => $salesData->count()]);
+
+    return response()->json([
+        'salesData' => $salesData,
+        'filters' => $request->all()
+    ]);
+}
 }
