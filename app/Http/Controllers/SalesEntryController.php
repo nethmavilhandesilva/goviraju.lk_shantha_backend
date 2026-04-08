@@ -1270,6 +1270,35 @@ class SalesEntryController extends Controller
         ], 500);
     }
 }
+public function bulkUpdateCustomer(Request $request)
+{
+    try {
+        $validated = $request->validate([
+            'sale_ids' => 'required|array',
+            'sale_ids.*' => 'exists:sales,id',
+            'customer_code' => 'required|string|max:255'
+        ]);
+
+        $updatedSales = [];
+        foreach ($validated['sale_ids'] as $saleId) {
+            $sale = Sale::find($saleId);
+            $sale->customer_code = strtoupper($validated['customer_code']);
+            $sale->save();
+            $updatedSales[] = $sale;
+        }
+
+        return response()->json([
+            'success' => true,
+            'sales' => $updatedSales,
+            'message' => count($updatedSales) . ' records updated successfully'
+        ]);
+    } catch (\Exception $e) {
+        return response()->json([
+            'success' => false,
+            'message' => $e->getMessage()
+        ], 500);
+    }
+}
 
 
 

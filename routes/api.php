@@ -237,5 +237,6 @@ Route::get('/supplier-loan/search', [SupplierLoanController::class, 'findLoan'])
 Route::get('/supplier-loans/report', [SupplierLoanController::class, 'getReport']);
 Route::post('/suppliers/delete-loan-record', [SupplierLoanController::class, 'deleteLoanRecord']);
 //bulk update in sales entry page
+Route::post('/sales/bulk-update-customer', [SalesEntryController::class, 'bulkUpdateCustomer']);
 Route::post('/sales/bulk-update-supplier', [SalesEntryController::class, 'bulkUpdateSupplier']);
 //bulk update supplier
