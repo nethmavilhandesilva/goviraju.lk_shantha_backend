@@ -165,6 +165,7 @@ class SupplierController extends Controller
             'SupplierPackCost',
             'CustomerPackLabour',
             'supplier_bill_printed',
+            'CustomerPackCost',
             'supplier_bill_no',
             'profile_pic',
             'nic_front',
@@ -429,6 +430,7 @@ private function sendTextLKSMS($data, $billNo, $records, $token)
                 'SupplierTotal', // Supplier's gross total for the sale
                 'SupplierPricePerKg',
                 'SupplierPackCost',
+                'CustomerPackCost',
                 'supplier_bill_printed',
                 'supplier_bill_no',
                 'loan_taken',
@@ -471,6 +473,7 @@ private function sendTextLKSMS($data, $billNo, $records, $token)
                 'SupplierPricePerKg',
                 'SupplierPackCost',
                 'supplier_bill_printed',
+                'CustomerPackCost',
                 'supplier_bill_no',
                 'loan_taken',
                 DB::raw('DATE(created_at) as Date')
@@ -513,6 +516,7 @@ private function sendTextLKSMS($data, $billNo, $records, $token)
                 'bill_no', // Original customer bill no
                 'SupplierTotal', // Supplier's gross total for the sale
                 'SupplierPricePerKg',
+                'CustomerPackCost',
                 'SupplierPackCost',
                 'supplier_bill_printed',
                 'supplier_bill_no',
