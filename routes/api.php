@@ -42,7 +42,8 @@ Route::middleware('auth:sanctum')->group(function () {
     //new supplier dashboarrd routes
     Route::get('/suppliers/all-codes', [SupplierLoanController::class, 'getAllCodes']);
     Route::get('/suppliers/full-report', [SupplierLoanController::class, 'getFarmerFullReport']);
-
+    //Kuliya Report
+Route::get('/sales/todays-kuliya', [SalesEntryController::class, 'getTodaysKuliya']);
 
     // ITEMS
     Route::apiResource('items', ItemController::class);
@@ -113,7 +114,7 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::get('/grn-report', [ReportController::class, 'grnReport2']);
     Route::get('/financial-report', [ReportController2::class, 'getFinancialData']);
     // routes/api.php
-Route::get('/settings', function () {
+    Route::get('/settings', function () {
         // We fetch the first record. 
         // If you have multiple keys, use: Setting::where('key', 'your_key')->first();
         $setting = Setting::first();
@@ -153,10 +154,10 @@ Route::get('/settings', function () {
     Route::post('/suppliers/mark-as-printed', [SupplierController::class, 'marksuppliers']);
     Route::get('/suppliers/bill/{billNo}/details', [SupplierController::class, 'getBillDetails']);
     Route::get('/suppliers/{supplierCode}/unprinted-details', [SupplierController::class, 'getUnprintedDetails']);
-        Route::get('/suppliers/{supplierCode}/unprinted-details2', [SupplierController::class, 'getUnprintedDetails2']);
+    Route::get('/suppliers/{supplierCode}/unprinted-details2', [SupplierController::class, 'getUnprintedDetails2']);
     //Day Process
     Route::post('/sales/process-day', [SalesEntryController::class, 'processDay']);
-
+   
     //loan section
     Route::get('/customers-loans/data', [CustomersLoanController::class, 'getInitialData']); // NEW: For Customers, GRN Codes
     Route::get('/customers-loans/index', [CustomersLoanController::class, 'index']); // Get today's loans
@@ -164,11 +165,11 @@ Route::get('/settings', function () {
     // Loan CRUD (using the existing methods)
     Route::post('/customers-loans', [CustomersLoanController::class, 'store']);
     // Note: React will use POST with _method=PUT to hit this route
-    Route::post('/customers-loans/{id}', [CustomersLoanController::class, 'updateApi']); 
+    Route::post('/customers-loans/{id}', [CustomersLoanController::class, 'updateApi']);
     Route::delete('/customers-loans/{id}', [CustomersLoanController::class, 'destroy']);
 
     // Utility Endpoints
-    Route::get('/customers/{customerId}/loans-total', [CustomersLoanController::class, 'getTotalLoanAmount']); 
+    Route::get('/customers/{customerId}/loans-total', [CustomersLoanController::class, 'getTotalLoanAmount']);
     Route::post('/settings/updateBalance', [CustomersLoanController::class, 'updateBalance']); // Assuming you'll add this method
     Route::get('/api/grn-entry/{code}', [CustomersLoanController::class, 'getGrnEntry']); // NEW: For item code autofill
     Route::get('/api/all-bill-nos', [CustomersLoanController::class, 'getAllBillNos']); // NEW: For bill no dropdown
@@ -177,19 +178,19 @@ Route::get('/settings', function () {
     //loans
     Route::post('/loan-report-results', [CustomersLoanController::class, 'getLoanReportData']);
     //update given amount
-    Route::get('/sales/customer/given-amount/{customerCode}', function($customerCode) {
-    // Get the latest given_amount for this customer
-    $latestSale = \App\Models\Sale::where('customer_code', $customerCode)
-        ->whereNotNull('given_amount')
-        ->orderBy('updated_at', 'desc')
-        ->first();
-    
-    return response()->json([
-        'success' => true,
-        'given_amount' => $latestSale ? $latestSale->given_amount : null
-    ]);
-});
-Route::middleware('auth:sanctum')->get('/supplier-report', [ReportController::class, 'getSupplierReport']);
+    Route::get('/sales/customer/given-amount/{customerCode}', function ($customerCode) {
+        // Get the latest given_amount for this customer
+        $latestSale = \App\Models\Sale::where('customer_code', $customerCode)
+            ->whereNotNull('given_amount')
+            ->orderBy('updated_at', 'desc')
+            ->first();
+
+        return response()->json([
+            'success' => true,
+            'given_amount' => $latestSale ? $latestSale->given_amount : null
+        ]);
+    });
+    Route::middleware('auth:sanctum')->get('/supplier-report', [ReportController::class, 'getSupplierReport']);
 });
 //printed sales report
 Route::get('/sales-report/printed', [ReportController::class, 'getPrintedReport']);
@@ -203,8 +204,8 @@ Route::get('/reports/sales-summary', [ReportController::class, 'getSalesSummary'
 Route::get('/reports/bill-details/{billNo}/{customerCode}', [ReportController::class, 'getBillDetails']);
 //new farmer report
 // FARMER (SUPPLIER) REPORT ROUTES
-    Route::get('/reports/farmers-summary', [ReportController::class, 'getFarmersSummary']);
-    Route::get('/reports/farmer-bill-details/{billNo}/{supplierCode}', [ReportController::class, 'getFarmerBillDetails']);
+Route::get('/reports/farmers-summary', [ReportController::class, 'getFarmersSummary']);
+Route::get('/reports/farmer-bill-details/{billNo}/{supplierCode}', [ReportController::class, 'getFarmerBillDetails']);
 //add or create a customer record
 Route::post('/customers/check-or-create', [CustomerController::class, 'checkOrCreate']);
 //validation

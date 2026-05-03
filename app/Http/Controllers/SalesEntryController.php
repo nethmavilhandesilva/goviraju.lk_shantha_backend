@@ -224,7 +224,7 @@ class SalesEntryController extends Controller
         if (str_starts_with($validated['item_code'], '/')) {
             $kuliya = 50;
         } elseif (str_contains($validated['item_name'], 'කෙසෙල්')) {
-            $kuliya = 150;
+            $kuliya = 1.50;
         } else {
             $weight = $incomingNetWeight;
 
@@ -234,10 +234,8 @@ class SalesEntryController extends Controller
                 $kuliya = 20;
             } elseif ($weight >= 20 && $weight <= 49) {
                 $kuliya = 40;
-            } elseif ($weight >= 50 && $weight <= 99) {
+            } elseif ($weight >= 50) {
                 $kuliya = 50;
-            } elseif ($weight >= 100) {
-                $kuliya = $weight; // ✅ NEW RULE
             }
         }
 
@@ -277,7 +275,7 @@ class SalesEntryController extends Controller
                 if (str_starts_with($validated['item_code'], '/')) {
                     $updatedKuliya = 50;
                 } elseif (str_contains($validated['item_name'], 'කෙසෙල්')) {
-                    $updatedKuliya = 150;
+                    $updatedKuliya = 1.50;
                 } else {
                     if ($newWeight >= 1 && $newWeight <= 9) {
                         $updatedKuliya = 0;
@@ -285,11 +283,9 @@ class SalesEntryController extends Controller
                         $updatedKuliya = 20;
                     } elseif ($newWeight >= 20 && $newWeight <= 49) {
                         $updatedKuliya = 40;
-                    } elseif ($newWeight >= 50 && $newWeight <= 99) {
+                    } elseif ($newWeight >= 50) {
                         $updatedKuliya = 50;
-                    } elseif ($newWeight >= 100) {
-                        $updatedKuliya = $newWeight; // ✅ NEW RULE
-                    }
+                    } 
                 }
 
                 $history = $existingSale->breakdown_history;
@@ -1299,7 +1295,39 @@ public function bulkUpdateCustomer(Request $request)
         ], 500);
     }
 }
+ public function getTodaysKuliya(Request $request)
+{
+    try {
+        // Fetch all sales with Kuliya > 0 (no date filter)
+        $kuliyaRecords = Sale::where('Kuliya', '>', 0)
+            ->select(
+                'id',
+                'customer_name',
+                'customer_code',
+                'bill_no',
+                'Kuliya',
+                'created_at'
+            )
+            ->orderBy('created_at', 'desc')
+            ->get();
 
+        // Calculate total Kuliya
+        $totalKuliya = $kuliyaRecords->sum('Kuliya');
+
+        return response()->json([
+            'success' => true,
+            'data' => $kuliyaRecords,
+            'total' => $totalKuliya,
+            'record_count' => $kuliyaRecords->count()
+        ]);
+    } catch (\Exception $e) {
+        return response()->json([
+            'success' => false,
+            'message' => 'Failed to fetch Kuliya data',
+            'error' => $e->getMessage()
+        ], 500);
+    }
+}
 
 
 }
