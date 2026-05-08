@@ -240,4 +240,5 @@ Route::post('/suppliers/delete-loan-record', [SupplierLoanController::class, 'de
 //bulk update in sales entry page
 Route::post('/sales/bulk-update-customer', [SalesEntryController::class, 'bulkUpdateCustomer']);
 Route::post('/sales/bulk-update-supplier', [SalesEntryController::class, 'bulkUpdateSupplier']);
-
+//kuliya private function
+Route::post('/sales/calculate-kuliya', [SalesEntryController::class, 'calculateKuliyaApi']);
