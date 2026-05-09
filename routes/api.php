@@ -43,7 +43,9 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::get('/suppliers/all-codes', [SupplierLoanController::class, 'getAllCodes']);
     Route::get('/suppliers/full-report', [SupplierLoanController::class, 'getFarmerFullReport']);
     //Kuliya Report
-Route::get('/sales/todays-kuliya', [SalesEntryController::class, 'getTodaysKuliya']);
+    Route::get('/sales/todays-kuliya', [SalesEntryController::class, 'getTodaysKuliya']);
+    //fetching sales to table bellow
+    Route::get('/sales/all-sales-data', [SalesEntryController::class, 'getAllSales2']);
 
     // ITEMS
     Route::apiResource('items', ItemController::class);
@@ -157,7 +159,7 @@ Route::get('/sales/todays-kuliya', [SalesEntryController::class, 'getTodaysKuliy
     Route::get('/suppliers/{supplierCode}/unprinted-details2', [SupplierController::class, 'getUnprintedDetails2']);
     //Day Process
     Route::post('/sales/process-day', [SalesEntryController::class, 'processDay']);
-   
+
     //loan section
     Route::get('/customers-loans/data', [CustomersLoanController::class, 'getInitialData']); // NEW: For Customers, GRN Codes
     Route::get('/customers-loans/index', [CustomersLoanController::class, 'index']); // Get today's loans
@@ -242,3 +244,4 @@ Route::post('/sales/bulk-update-customer', [SalesEntryController::class, 'bulkUp
 Route::post('/sales/bulk-update-supplier', [SalesEntryController::class, 'bulkUpdateSupplier']);
 //kuliya private function
 Route::post('/sales/calculate-kuliya', [SalesEntryController::class, 'calculateKuliyaApi']);
+

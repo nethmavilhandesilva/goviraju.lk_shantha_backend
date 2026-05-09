@@ -406,179 +406,179 @@ class SalesEntryController extends Controller
         }
     }
 
-  public function markAsPrinted(Request $request)
-{
-    Log::info('markAsPrinted Request Data:', $request->all());
+    public function markAsPrinted(Request $request)
+    {
+        Log::info('markAsPrinted Request Data:', $request->all());
 
-    $salesIds = $request->input('sales_ids');
-    if (empty($salesIds)) {
-        return response()->json(['status' => 'error', 'message' => 'No sales IDs provided.'], 400);
-    }
+        $salesIds = $request->input('sales_ids');
+        if (empty($salesIds)) {
+            return response()->json(['status' => 'error', 'message' => 'No sales IDs provided.'], 400);
+        }
 
-    try {
+        try {
 
-        // 1. ✅ HANDLE BILL NUMBER GENERATION
-        $existingBillNo = Sale::whereIn('id', $salesIds)
-            ->where('processed', 'Y')
-            ->whereNotNull('bill_no')
-            ->first()?->bill_no;
+            // 1. ✅ HANDLE BILL NUMBER GENERATION
+            $existingBillNo = Sale::whereIn('id', $salesIds)
+                ->where('processed', 'Y')
+                ->whereNotNull('bill_no')
+                ->first()?->bill_no;
 
-        $billNoToUse = $existingBillNo ?: $this->generateNewBillNumber();
+            $billNoToUse = $existingBillNo ?: $this->generateNewBillNumber();
 
-        $salesRecords = null;
+            $salesRecords = null;
 
-        // 2. ✅ UPDATE SALES RECORDS IN TRANSACTION
-        DB::transaction(function () use ($salesIds, $billNoToUse, &$salesRecords) {
+            // 2. ✅ UPDATE SALES RECORDS IN TRANSACTION
+            DB::transaction(function () use ($salesIds, $billNoToUse, &$salesRecords) {
 
-            $salesRecords = Sale::whereIn('id', $salesIds)->get();
+                $salesRecords = Sale::whereIn('id', $salesIds)->get();
 
+                foreach ($salesRecords as $sale) {
+
+                    if ($sale->bill_printed === 'Y') {
+                        $sale->BillReprintAfterChanges = now();
+                    }
+
+                    $sale->bill_printed = 'Y';
+                    $sale->processed = 'Y';
+                    $sale->bill_no = $billNoToUse;
+                    $sale->FirstTimeBillPrintedOn = $sale->FirstTimeBillPrintedOn ?? now();
+                    $sale->save();
+                }
+            });
+
+            // 3. ✅ GENERATE ITEM SUMMARY + BILL FINAL TOTAL
+            $itemsForSummary = Sale::whereIn('id', $salesIds)->get();
+
+            // ✅ Bill Final Total (total + CustomerPackCost)
+            $billFinalTotal = $itemsForSummary->sum(function ($item) {
+                return (float) $item->total + (float) $item->CustomerPackCost;
+            });
+
+            // ✅ Group summary
+            $summaryString = $itemsForSummary->groupBy('item_code')->map(function ($group) {
+
+                $itemName = $group->first()->item_name;
+                $itemCode = $group->first()->item_code;
+                $totalWeight = $group->sum('weight');
+                $totalPacks = $group->sum('packs');
+
+                return "{$itemName}({$itemCode})={$totalWeight}/{$totalPacks}";
+            })->implode("\n");
+
+            // ✅ FIX: Prepare sales data from actual database records, NOT from request
+            $formattedSalesData = [];
             foreach ($salesRecords as $sale) {
-
-                if ($sale->bill_printed === 'Y') {
-                    $sale->BillReprintAfterChanges = now();
-                }
-
-                $sale->bill_printed = 'Y';
-                $sale->processed = 'Y';
-                $sale->bill_no = $billNoToUse;
-                $sale->FirstTimeBillPrintedOn = $sale->FirstTimeBillPrintedOn ?? now();
-                $sale->save();
+                $formattedSalesData[] = [
+                    'id' => $sale->id,
+                    'item_name' => $sale->item_name,
+                    'item_code' => $sale->item_code,
+                    'weight' => (float) $sale->weight,
+                    'price_per_kg' => (float) $sale->price_per_kg,
+                    'packs' => (int) $sale->packs,
+                    'supplier_code' => $sale->supplier_code,
+                    'customer_code' => $sale->customer_code,
+                    'total' => (float) $sale->total,
+                    'SupplierTotal' => (float) $sale->SupplierTotal,
+                    'SupplierPricePerKg' => (float) $sale->SupplierPricePerKg,
+                    'CustomerPackCost' => (float) ($sale->CustomerPackCost ?? 0),
+                    'Kuliya' => (float) ($sale->Kuliya ?? 0),
+                    'commission_amount' => (float) ($sale->commission_amount ?? 0),
+                ];
             }
-        });
 
-        // 3. ✅ GENERATE ITEM SUMMARY + BILL FINAL TOTAL
-        $itemsForSummary = Sale::whereIn('id', $salesIds)->get();
+            // 4. ✅ CREATE PUBLIC BILL LINK WITH ACTUAL SALES DATA
+            $token = Str::random(40);
+            $baseUrl = env('APP_FRONTEND_URL', 'https://goviraju.lk/DBS_30500/');
+            $publicUrl = rtrim($baseUrl, '/') . "/view-bill/" . $token;
 
-        // ✅ Bill Final Total (total + CustomerPackCost)
-        $billFinalTotal = $itemsForSummary->sum(function ($item) {
-            return (float) $item->total + (float) $item->CustomerPackCost;
-        });
+            DB::table('bill_links')->insert([
+                'token' => $token,
+                'bill_no' => $billNoToUse,
+                'sales_data' => json_encode($formattedSalesData), // ✅ FIXED: Using actual data from DB
+                'loan_amount' => $request->loan_amount ?? 0,
+                'customer_name' => $request->customer_name,
+                'created_at' => now(),
+                'updated_at' => now()
+            ]);
 
-        // ✅ Group summary
-        $summaryString = $itemsForSummary->groupBy('item_code')->map(function ($group) {
+            // 5. ✅ RESOLVE TELEPHONE NUMBER
+            $to = $request->telephone_no;
 
-            $itemName = $group->first()->item_name;
-            $itemCode = $group->first()->item_code;
-            $totalWeight = $group->sum('weight');
-            $totalPacks = $group->sum('packs');
+            $customerCode = $request->customer_code
+                ?? $request->customer_name
+                ?? ($salesRecords->first()->customer_code ?? null);
 
-            return "{$itemName}({$itemCode})={$totalWeight}/{$totalPacks}";
-        })->implode("\n");
+            if (empty($to) && !empty($customerCode)) {
 
-        // ✅ FIX: Prepare sales data from actual database records, NOT from request
-        $formattedSalesData = [];
-        foreach ($salesRecords as $sale) {
-            $formattedSalesData[] = [
-                'id' => $sale->id,
-                'item_name' => $sale->item_name,
-                'item_code' => $sale->item_code,
-                'weight' => (float)$sale->weight,
-                'price_per_kg' => (float)$sale->price_per_kg,
-                'packs' => (int)$sale->packs,
-                'supplier_code' => $sale->supplier_code,
-                'customer_code' => $sale->customer_code,
-                'total' => (float)$sale->total,
-                'SupplierTotal' => (float)$sale->SupplierTotal,
-                'SupplierPricePerKg' => (float)$sale->SupplierPricePerKg,
-                'CustomerPackCost' => (float)($sale->CustomerPackCost ?? 0),
-                'Kuliya' => (float)($sale->Kuliya ?? 0),
-                'commission_amount' => (float)($sale->commission_amount ?? 0),
-            ];
-        }
+                $customer = Customer::where('short_name', $customerCode)->first();
 
-        // 4. ✅ CREATE PUBLIC BILL LINK WITH ACTUAL SALES DATA
-        $token = Str::random(40);
-        $baseUrl = env('APP_FRONTEND_URL', 'https://goviraju.lk/DBS_30500/');
-        $publicUrl = rtrim($baseUrl, '/') . "/view-bill/" . $token;
-
-        DB::table('bill_links')->insert([
-            'token' => $token,
-            'bill_no' => $billNoToUse,
-            'sales_data' => json_encode($formattedSalesData), // ✅ FIXED: Using actual data from DB
-            'loan_amount' => $request->loan_amount ?? 0,
-            'customer_name' => $request->customer_name,
-            'created_at' => now(),
-            'updated_at' => now()
-        ]);
-
-        // 5. ✅ RESOLVE TELEPHONE NUMBER
-        $to = $request->telephone_no;
-
-        $customerCode = $request->customer_code
-            ?? $request->customer_name
-            ?? ($salesRecords->first()->customer_code ?? null);
-
-        if (empty($to) && !empty($customerCode)) {
-
-            $customer = Customer::where('short_name', $customerCode)->first();
-
-            if ($customer) {
-                $to = $customer->telephone_no;
-            }
-        }
-
-        // 6. ✅ SEND SMS VIA TEXT.LK
-        if (!empty($to)) {
-
-            try {
-
-                // ✅ Clean number: remove +, spaces, dashes
-                $to = preg_replace('/[^0-9]/', '', $to);
-
-                // ✅ Convert 07XXXXXXXX -> 947XXXXXXXX
-                if (str_starts_with($to, '0')) {
-                    $to = '94' . substr($to, 1);
+                if ($customer) {
+                    $to = $customer->telephone_no;
                 }
-
-                // ✅ UPDATED MESSAGE BODY WITH BILL FINAL TOTAL
-                $messageBody =
-                    "Customer Bill,\n" .
-                    "Hello {$customerCode},\n" .
-                    "Bill #{$billNoToUse} Summary:\n" .
-                    "{$summaryString}\n" .
-                    "Bill Final Total: " . number_format($billFinalTotal, 2) . "\n" .
-                    "View: {$publicUrl}";
-
-                $textLKSMS = new TextLKSMSMessage();
-
-                $result = $textLKSMS->recipient($to)
-                    ->message($messageBody)
-                    ->senderId(env('TEXTLK_SENDER_ID', 'TextLKDemo'))
-                    ->apiKey(env('TEXTLK_API_KEY'))
-                    ->send();
-
-                if ($result) {
-                    Log::info("Text.lk SMS sent successfully to: " . $to);
-                } else {
-                    Log::error("Text.lk SMS failed to send to: " . $to);
-                }
-
-            } catch (\Exception $e) {
-
-                Log::error("=== TEXT.LK SMS SENDING FAILED ===");
-                Log::error("Target Number: " . $to);
-                Log::error("Error Message: " . $e->getMessage());
-                Log::error("=================================");
             }
+
+            // 6. ✅ SEND SMS VIA TEXT.LK
+            if (!empty($to)) {
+
+                try {
+
+                    // ✅ Clean number: remove +, spaces, dashes
+                    $to = preg_replace('/[^0-9]/', '', $to);
+
+                    // ✅ Convert 07XXXXXXXX -> 947XXXXXXXX
+                    if (str_starts_with($to, '0')) {
+                        $to = '94' . substr($to, 1);
+                    }
+
+                    // ✅ UPDATED MESSAGE BODY WITH BILL FINAL TOTAL
+                    $messageBody =
+                        "Customer Bill,\n" .
+                        "Hello {$customerCode},\n" .
+                        "Bill #{$billNoToUse} Summary:\n" .
+                        "{$summaryString}\n" .
+                        "Bill Final Total: " . number_format($billFinalTotal, 2) . "\n" .
+                        "View: {$publicUrl}";
+
+                    $textLKSMS = new TextLKSMSMessage();
+
+                    $result = $textLKSMS->recipient($to)
+                        ->message($messageBody)
+                        ->senderId(env('TEXTLK_SENDER_ID', 'TextLKDemo'))
+                        ->apiKey(env('TEXTLK_API_KEY'))
+                        ->send();
+
+                    if ($result) {
+                        Log::info("Text.lk SMS sent successfully to: " . $to);
+                    } else {
+                        Log::error("Text.lk SMS failed to send to: " . $to);
+                    }
+
+                } catch (\Exception $e) {
+
+                    Log::error("=== TEXT.LK SMS SENDING FAILED ===");
+                    Log::error("Target Number: " . $to);
+                    Log::error("Error Message: " . $e->getMessage());
+                    Log::error("=================================");
+                }
+            }
+
+            return response()->json([
+                'status' => 'success',
+                'message' => 'Sales processed and SMS sent via Text.lk!',
+                'bill_no' => $billNoToUse,
+                'bill_link' => $publicUrl
+            ]);
+
+        } catch (\Exception $e) {
+
+            Log::error('markAsPrinted Failed:', ['error' => $e->getMessage()]);
+
+            return response()->json([
+                'status' => 'error',
+                'message' => 'Failed to update records.'
+            ], 500);
         }
-
-        return response()->json([
-            'status' => 'success',
-            'message' => 'Sales processed and SMS sent via Text.lk!',
-            'bill_no' => $billNoToUse,
-            'bill_link' => $publicUrl
-        ]);
-
-    } catch (\Exception $e) {
-
-        Log::error('markAsPrinted Failed:', ['error' => $e->getMessage()]);
-
-        return response()->json([
-            'status' => 'error',
-            'message' => 'Failed to update records.'
-        ], 500);
     }
-}
     private function generateNewBillNumber()
     {
         return \DB::transaction(function () {
@@ -1367,6 +1367,40 @@ class SalesEntryController extends Controller
                 'success' => false,
                 'message' => 'Failed to fetch Kuliya data',
                 'error' => $e->getMessage()
+            ], 500);
+        }
+    }
+    public function getAllSales2()
+    {
+        try {
+            $currentUser = auth()->user();
+
+            if (!$currentUser) {
+                return response()->json(['error' => 'Unauthorized'], 401);
+            }
+
+            $query = Sale::query();
+
+            // Filter by user role if needed
+            if ($currentUser->role === 'User') {
+                $query->where('UniqueCode', $currentUser->user_id);
+            }
+
+            $allSales = $query->orderBy('created_at', 'desc')->get();
+
+            return response()->json([
+                'success' => true,
+                'sales' => $allSales,
+                'count' => $allSales->count()
+            ]);
+
+        } catch (\Exception $e) {
+            Log::error('Failed to fetch all sales: ' . $e->getMessage());
+
+            return response()->json([
+                'success' => false,
+                'error' => 'Failed to fetch sales data.',
+                'message' => $e->getMessage()
             ], 500);
         }
     }
