@@ -68,6 +68,13 @@ jobs:
           FTP_USERNAME: ${{ secrets.FTP_USERNAME }}
           FTP_PASSWORD: ${{ secrets.FTP_PASSWORD }}
         run: |
+          # Tolerate stray whitespace, ftp:// prefix or trailing slash in the secret
+          FTP_SERVER=$(printf '%s' "$FTP_SERVER" | tr -d '[:space:]' | sed -E 's#^[a-z]+://##; s#/+$##')
+          FTP_USERNAME=$(printf '%s' "$FTP_USERNAME" | tr -d '[:space:]')
+          if [ -z "$FTP_SERVER" ]; then
+            echo "::error::FTP_SERVER secret is empty"
+            exit 1
+          fi
           for f in deploy.zip _deploy.php; do
             curl --fail --silent --show-error --ssl-reqd --ftp-create-dirs \
               --user "${FTP_USERNAME}:${FTP_PASSWORD}" \
