@@ -1,0 +1,11 @@
+# Serves the app from public/ when reached via goviraju.lk/shantha_backend
+# and keeps .env, vendor, storage etc. from being downloadable.
+<IfModule mod_rewrite.c>
+    RewriteEngine On
+    RewriteRule ^_deploy\.php$ - [L]
+    RewriteRule ^(.*)$ public/$1 [L]
+</IfModule>
+
+<FilesMatch "^\.env">
+    Require all denied
+</FilesMatch>

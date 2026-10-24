@@ -9,6 +9,10 @@ concurrency:
   group: deploy-backend
   cancel-in-progress: false
 
+env:
+  REMOTE_DIR: shantha_backend
+  DEPLOY_URL: https://goviraju.lk/shantha_backend/_deploy.php
+
 jobs:
   deploy:
     runs-on: ubuntu-latest
@@ -20,9 +24,17 @@ jobs:
       - name: Set up PHP
         uses: shivammathur/setup-php@v2
         with:
-          php-version: '8.2'
+          php-version: '8.3'
           extensions: mbstring, pdo, pdo_mysql, xml, curl, zip, gd, bcmath
           tools: composer:v2
+          coverage: none
+
+      - name: Cache Composer downloads
+        uses: actions/cache@v4
+        with:
+          path: ~/.composer/cache/files
+          key: composer-${{ hashFiles('composer.lock') }}
+          restore-keys: composer-
 
       - name: Install Composer dependencies (production)
         run: composer install --no-dev --prefer-dist --no-interaction --no-progress --optimize-autoloader
@@ -35,34 +47,36 @@ jobs:
 
       - name: Build frontend assets (Vite)
         run: |
-          npm ci
+          npm ci --no-audit --no-fund
           npm run build
 
-      - name: Deploy via FTP
-        uses: SamKirkland/FTP-Deploy-Action@v4.3.5
-        with:
-          server: ${{ secrets.FTP_SERVER }}
-          username: ${{ secrets.FTP_USERNAME }}
-          password: ${{ secrets.FTP_PASSWORD }}
-          protocol: ftps
-          port: 21
-          server-dir: shantha_backend/
-          exclude: |
-            **/.git*
-            **/.git*/**
-            **/node_modules/**
-            .github/**
-            tests/**
-            .env
-            .env.*
-            !.env.example
-            **/.DS_Store
-            public/storage
-            public/hot
-            public/error_log
-            storage/logs/**
-            storage/framework/cache/data/**
-            storage/framework/sessions/**
-            storage/framework/views/**
-            storage/app/public/**
-            bootstrap/cache/*.php
+      - name: Package release
+        run: |
+          zip -qr deploy.zip . \
+            -x '.git/*' '.github/*' 'node_modules/*' 'tests/*' \
+               '.env' '.env.*' '*.DS_Store' 'public/error_log' 'deploy.zip'
+          ls -lh deploy.zip
+
+      - name: Prepare deploy script
+        env:
+          DEPLOY_TOKEN: ${{ secrets.DEPLOY_TOKEN }}
+        run: sed "s|__DEPLOY_TOKEN__|${DEPLOY_TOKEN}|" .github/deploy/_deploy.php > _deploy.php
+
+      - name: Upload via FTP
+        env:
+          FTP_SERVER: ${{ secrets.FTP_SERVER }}
+          FTP_USERNAME: ${{ secrets.FTP_USERNAME }}
+          FTP_PASSWORD: ${{ secrets.FTP_PASSWORD }}
+        run: |
+          for f in deploy.zip _deploy.php; do
+            curl --fail --silent --show-error --ssl-reqd --ftp-create-dirs \
+              --user "${FTP_USERNAME}:${FTP_PASSWORD}" \
+              -T "$f" "ftp://${FTP_SERVER}/${REMOTE_DIR}/$f"
+          done
+
+      - name: Extract and run migrations on server
+        env:
+          DEPLOY_TOKEN: ${{ secrets.DEPLOY_TOKEN }}
+        run: |
+          curl --fail-with-body --silent --show-error --max-time 600 \
+            -X POST -H "X-Deploy-Token: ${DEPLOY_TOKEN}" "${DEPLOY_URL}"
