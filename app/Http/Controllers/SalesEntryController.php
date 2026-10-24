@@ -1149,7 +1149,9 @@ class SalesEntryController extends Controller
             ->orderBy('created_at', 'desc')
             ->get();
 
-        Supplier::whereDate('advance_created_date', $processLogDate)
+        // advance_created_date is a text column that can hold non-date values,
+        // so match the date prefix instead of DATE() which errors in strict mode
+        Supplier::where('advance_created_date', 'like', $processLogDate . '%')
             ->update([
                 'advance_amount' => 0,
                 'advance_created_date' => null

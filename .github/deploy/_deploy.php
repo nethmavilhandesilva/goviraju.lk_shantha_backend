@@ -4,6 +4,8 @@
 
 $token = '__DEPLOY_TOKEN__';
 
+// Buffer output so the status code can still be changed after echoing progress
+ob_start();
 header('Content-Type: text/plain');
 
 if ($_SERVER['REQUEST_METHOD'] !== 'POST'
