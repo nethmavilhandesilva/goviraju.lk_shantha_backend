@@ -35,4 +35,8 @@ return [
         ],
     ],
 
+    'google_tts' => [
+        'key' => env('GOOGLE_TTS_API_KEY'),
+    ],
+
 ];

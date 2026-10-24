@@ -791,14 +791,22 @@ public function bulkUpdateSupplier(Request $request)
     $validated = $request->validate([
         'transaction_ids' => 'required|array',
         'transaction_ids.*' => 'exists:sales,id',
-        'supplier_code'   => 'required|string',
+        'supplier_code'   => 'nullable|string',
         'customer_code'   => 'nullable|string'
     ]);
 
+    if (!$request->filled('supplier_code') && !$request->filled('customer_code')) {
+        return response()->json([
+            'error' => 'Provide at least one of supplier_code or customer_code.'
+        ], 422);
+    }
+
     try {
-        $updateData = [
-            'supplier_code' => strtoupper($validated['supplier_code']),
-        ];
+        $updateData = [];
+
+        if ($request->filled('supplier_code')) {
+            $updateData['supplier_code'] = strtoupper($validated['supplier_code']);
+        }
 
         if ($request->filled('customer_code')) {
             $updateData['customer_code'] = strtoupper($validated['customer_code']);

@@ -838,25 +838,33 @@ class SalesEntryController extends Controller
             return response()->json(['success' => false, 'message' => $e->getMessage()], 500);
         }
     }
-    private function calculateKuliya($itemCode, $itemName, $weight)
-    {
-        if (str_starts_with($itemCode, '/')) {
-            return 50;
-        } elseif (str_contains($itemName, 'කෙසෙල්')) {
-            return 1.50;
-        } else {
-            if ($weight >= 1 && $weight <= 9) {
-                return 0;
-            } elseif ($weight >= 10 && $weight <= 19) {
-                return 20;
-            } elseif ($weight >= 20 && $weight <= 49) {
-                return 40;
-            } elseif ($weight >= 50) {
-                return 50;
-            }
-            return 0;
-        }
+ private function calculateKuliya($itemCode, $itemName, $weight)
+{
+    // If item code is CAA, kuliya = 1.50
+    if ($itemCode === 'CAA') {
+        return 1.50;
     }
+
+    // If item name contains "කෙසෙල්", kuliya = 1.50
+    if (str_contains($itemName, 'කෙසෙල්')) {
+        return 1.50;
+    }
+
+    // Weight-based kuliya calculation
+    if ($weight < 10) {
+        return 0;
+    } elseif ($weight >= 10 && $weight <= 19) {
+        return 20;
+    } elseif ($weight >= 20 && $weight <= 49) {
+        return 40;
+    } elseif ($weight >= 50 && $weight <= 99) {
+        return 50;
+    } elseif ($weight >= 100) {
+        return 1;
+    }
+
+    return 0;
+}
     public function calculateKuliyaApi(Request $request)
     {
         $request->validate([

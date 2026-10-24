@@ -14,6 +14,7 @@ use App\Http\Controllers\ReportController;
 use App\Http\Controllers\AuthController;
 use App\Http\Controllers\SalesEntryController;
 use App\Http\Controllers\CommissionController;
+use App\Http\Controllers\TtsController;
 use App\Models\Setting;
 
 // ----------------------------------------------------------------------
@@ -32,6 +33,9 @@ Route::get('/items/options', [CommissionController::class, 'getItemOptions']);
 // ✅ PROTECTED ROUTES (Requires 'auth:sanctum') 
 // ----------------------------------------------------------------------
 Route::middleware('auth:sanctum')->group(function () {
+    // SINHALA TEXT-TO-SPEECH (bill total announcement on F1 print)
+    Route::post('/tts/speak', [TtsController::class, 'synthesize']);
+
     Route::put('/sales/bulk-update-supplier', [SupplierController::class, 'bulkUpdateSupplier']);
     // CUSTOMERS
     Route::get('/suppliers/loan-summary', [SupplierLoanController::class, 'getLoanTakenSummary']);
