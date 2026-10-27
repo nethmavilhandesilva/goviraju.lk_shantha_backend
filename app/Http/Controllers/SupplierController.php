@@ -14,6 +14,44 @@ use Illuminate\Support\Str;
 
 class SupplierController extends Controller
 {
+    /**
+     * Supplier codes whose bills drop the gram part of each sale's weight.
+     * Add or remove codes here to turn the 500 g deduction on/off per supplier.
+     * Every supplier not listed keeps the normal weight (e.g. 12.500 kg).
+     */
+    private const GRAM_DEDUCTION_SUPPLIERS = [
+        // 'NVDS',
+        // 'SANJ',
+    ];
+
+    /**
+     * True when the given supplier is in the hardcoded gram-deduction list.
+     */
+    private function hasGramDeduction($supplierCode): bool
+    {
+        $code = strtoupper(trim((string) $supplierCode));
+        $listed = array_map(fn ($c) => strtoupper(trim($c)), self::GRAM_DEDUCTION_SUPPLIERS);
+
+        return $code !== '' && in_array($code, $listed, true);
+    }
+
+    /**
+     * For suppliers in GRAM_DEDUCTION_SUPPLIERS only: drop the gram part of each
+     * sale's weight (12.500 kg -> 12 kg) and recalculate SupplierTotal on that
+     * whole-kg weight (12 x price). Other suppliers' records are left unchanged.
+     * Only the in-memory records are changed; the sales table keeps the real values.
+     */
+    private function dropGramsFromWeights($records)
+    {
+        return $records->each(function ($record) {
+            if (!$this->hasGramDeduction($record->supplier_code)) {
+                return;
+            }
+            $record->weight = (int) floor((float) $record->weight);
+            $record->SupplierTotal = round($record->weight * (float) $record->SupplierPricePerKg, 2);
+        });
+    }
+
     public function index()
     {
         $suppliers = Supplier::all();
@@ -287,7 +325,7 @@ public function generateFSeriesBill(): JsonResponse
         \Log::info('Bill number generated', ['bill_no' => $finalBillNo]);
 
         // 2. Snapshot current data for the public link
-        $salesRecords = Sale::whereIn('id', $ids)->get();
+        $salesRecords = $this->dropGramsFromWeights(Sale::whereIn('id', $ids)->get());
         \Log::info('Sales records fetched', ['count' => $salesRecords->count()]);
 
         // 3. Mark records as printed
@@ -444,6 +482,8 @@ private function sendTextLKSMS($data, $billNo, $records, $token)
             ->whereNotNull('supplier_code') // Ensure a supplier code is present
             ->get();
 
+            $this->dropGramsFromWeights($details);
+
             return response()->json($details);
 
         } catch (\Exception $e) {
@@ -525,6 +565,8 @@ private function sendTextLKSMS($data, $billNo, $records, $token)
             ->where('supplier_bill_no', $billNo)
             ->where('supplier_bill_printed', 'Y')
             ->get();
+
+            $this->dropGramsFromWeights($details);
 
             return response()->json($details);
 
@@ -639,7 +681,7 @@ public function resendSupplierSMS(Request $request)
 
     try {
         // Fetch the CURRENT sales records for this bill with updated data
-        $salesRecords = Sale::whereIn('id', $validated['transaction_ids'])->get();
+        $salesRecords = $this->dropGramsFromWeights(Sale::whereIn('id', $validated['transaction_ids'])->get());
         
         if ($salesRecords->isEmpty()) {
             return response()->json(['error' => 'No records found'], 404);
