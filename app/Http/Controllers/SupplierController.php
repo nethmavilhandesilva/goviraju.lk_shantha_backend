@@ -20,8 +20,8 @@ class SupplierController extends Controller
      * Every supplier not listed keeps the normal weight (e.g. 12.500 kg).
      */
     private const GRAM_DEDUCTION_SUPPLIERS = [
-        // 'NVDS',
-        // 'SANJ',
+        'NVDS',
+        'SANJ',
     ];
 
     /**
@@ -49,6 +49,30 @@ class SupplierController extends Controller
             }
             $record->weight = (int) floor((float) $record->weight);
             $record->SupplierTotal = round($record->weight * (float) $record->SupplierPricePerKg, 2);
+        });
+    }
+
+    /**
+     * Supplier bill SMS is only sent when the Text.lk credentials are set in .env.
+     */
+    private function smsCredentialsConfigured(): bool
+    {
+        return !empty(env('TEXTLK_SMS_API_KEY')) && !empty(env('TEXTLK_SMS_SENDER_ID'));
+    }
+
+    /**
+     * Run an SMS send after the HTTP response has gone back to the browser, so the
+     * bill prints straight away and a slow or failing SMS never blocks or fails it.
+     */
+    private function sendSmsAfterResponse(callable $send, array $context): void
+    {
+        app()->terminating(function () use ($send, $context) {
+            try {
+                $result = $send();
+                \Log::info('Supplier bill SMS sent after response', $context + ['result' => $result]);
+            } catch (\Throwable $e) {
+                \Log::error('Supplier bill SMS failed', $context + ['error' => $e->getMessage()]);
+            }
         });
     }
 
@@ -350,27 +374,23 @@ public function generateFSeriesBill(): JsonResponse
         DB::commit();
         \Log::info('Transaction committed');
 
-        // 5. SEND SMS VIA TEXT.LK
-        if (!empty($validated['telephone_no'])) {
-            \Log::info('Attempting to send SMS', [
-                'telephone' => $validated['telephone_no'],
-                'bill_no' => $finalBillNo
-            ]);
-            
-            try {
-                $smsResult = $this->sendTextLKSMS($validated, $finalBillNo, $salesRecords, $token);
-                \Log::info('SMS function completed', ['result' => $smsResult]);
-            } catch (\Exception $e) {
-                \Log::error('SMS sending failed', [
-                    'error' => $e->getMessage(),
-                    'trace' => $e->getTraceAsString()
-                ]);
-            }
-        } else {
+        // 5. SEND SMS VIA TEXT.LK - after the response, so the bill prints first.
+        //    Skipped when there is no phone number or no Text.lk credentials in .env.
+        if (empty($validated['telephone_no'])) {
+            $smsStatus = 'skipped_no_phone';
             \Log::warning('No telephone number provided, SMS not sent');
+        } elseif (!$this->smsCredentialsConfigured()) {
+            $smsStatus = 'skipped_no_credentials';
+            \Log::warning('Text.lk credentials not set in .env, SMS not sent', ['bill_no' => $finalBillNo]);
+        } else {
+            $smsStatus = 'queued';
+            $this->sendSmsAfterResponse(
+                fn () => $this->sendTextLKSMS($validated, $finalBillNo, $salesRecords, $token),
+                ['bill_no' => $finalBillNo, 'telephone' => $validated['telephone_no']]
+            );
         }
 
-        return response()->json(['new_bill_no' => $finalBillNo, 'token' => $token]);
+        return response()->json(['new_bill_no' => $finalBillNo, 'token' => $token, 'sms' => $smsStatus]);
 
     } catch (\Exception $e) {
         DB::rollBack();
@@ -719,12 +739,27 @@ public function resendSupplierSMS(Request $request)
             $token = $this->createNewBillLink($validated, $salesRecords);
         }
 
-        // Send SMS with updated data
-        $smsResult = $this->sendReprintSMS($validated, $salesRecords, $token);
+        // Send SMS with updated data - after the response, and only when Text.lk is configured
+        if (!$this->smsCredentialsConfigured()) {
+            \Log::warning('Text.lk credentials not set in .env, reprint SMS not sent', ['bill_no' => $validated['bill_no']]);
+
+            return response()->json([
+                'success' => true,
+                'sms' => 'skipped_no_credentials',
+                'message' => 'Bill link updated; SMS not sent (no SMS credentials configured)',
+                'token' => $token
+            ]);
+        }
+
+        $this->sendSmsAfterResponse(
+            fn () => $this->sendReprintSMS($validated, $salesRecords, $token),
+            ['bill_no' => $validated['bill_no'], 'telephone' => $validated['telephone_no']]
+        );
 
         return response()->json([
             'success' => true,
-            'message' => 'SMS sent successfully with updated bill data',
+            'sms' => 'queued',
+            'message' => 'SMS is being sent with updated bill data',
             'token' => $token
         ]);
 

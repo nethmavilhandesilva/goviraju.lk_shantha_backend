@@ -8,6 +8,12 @@ return new class extends Migration
 {
     public function up()
     {
+        // The table already exists on databases where it was created before this
+        // migration was recorded; skip it there so `migrate` can continue.
+        if (Schema::hasTable('supplier_loans')) {
+            return;
+        }
+
         Schema::create('supplier_loans', function (Blueprint $table) {
             $table->id();
             $table->string('code')->index();

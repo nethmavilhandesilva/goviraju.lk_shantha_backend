@@ -23,6 +23,7 @@ class User extends Authenticatable
         'name',
         'email',
         'password',
+        'password2',
         'role',
         'user_id', // This should store 'pos12345'
         'ip_address'
@@ -35,6 +36,7 @@ class User extends Authenticatable
      */
     protected $hidden = [
         'password',
+        'password2',
         'remember_token',
     ];
 

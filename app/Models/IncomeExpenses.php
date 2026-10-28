@@ -20,6 +20,7 @@ class IncomeExpenses extends Model
         'bank',
         'cheque_date',
         'customer_short_name',
+        'supplier_code',
         'unique_code',
         'user_id',
         'Date',

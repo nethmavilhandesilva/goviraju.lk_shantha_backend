@@ -20,6 +20,42 @@ use Illuminate\Http\JsonResponse; // Added import for JsonResponse
 class CustomersLoanController extends Controller
 {
     /**
+     * Resolve the customer of a loan from either a selected customer_id or a typed-in
+     * name. A typed name that matches an existing customer's short_name is linked to
+     * that customer; otherwise the name is stored on its own with no customer_id.
+     *
+     * @return array [customerId|null, customerShortName|null]
+     */
+    private function resolveCustomer(array $validated): array
+    {
+        if (!empty($validated['customer_id'])) {
+            $customer = Customer::find($validated['customer_id']);
+            return [$validated['customer_id'], $customer ? $customer->short_name : null];
+        }
+
+        $typedName = strtoupper(trim($validated['customer_short_name'] ?? ''));
+        if ($typedName === '') {
+            return [null, null];
+        }
+
+        $customer = Customer::where('short_name', $typedName)->first();
+        return $customer ? [$customer->id, $customer->short_name] : [null, $typedName];
+    }
+
+    /**
+     * Farmer of a farmer_old / farmer_today loan: a selected supplier code or a
+     * typed-in farmer name, stored upper-cased in supplier_code.
+     */
+    private function resolveFarmerCode(array $validated, string $loanType): ?string
+    {
+        if (!in_array($loanType, ['farmer_old', 'farmer_today'])) {
+            return null;
+        }
+        $code = strtoupper(trim($validated['supplier_code'] ?? ''));
+        return $code === '' ? null : $code;
+    }
+
+    /**
      * Helper to fetch loans for a specific date.
      */
     private function fetchTodayLoans($date)
@@ -41,7 +77,8 @@ class CustomersLoanController extends Controller
                 'description' => $loan->description,
                 'amount' => (float) $loan->amount, // Keep original sign for logic
                 'display_amount' => number_format(abs($loan->amount), 2), // Display absolute value
-                'customer_short_name' => $loan->customer_short_name,
+                'customer_short_name' => $loan->customer_short_name ?? $loan->supplier_code,
+                'supplier_code' => $loan->supplier_code,
                 'bill_no' => $loan->bill_no,
                 'settling_way' => $loan->settling_way,
                 'cheque_no' => $loan->cheque_no,
@@ -89,9 +126,11 @@ class CustomersLoanController extends Controller
 
         // Base validation rules
         $rules = [
-            'loan_type' => 'required|string|in:old,today,ingoing,outgoing,grn_damage,returns',
+            'loan_type' => 'required|string|in:old,today,farmer_old,farmer_today,ingoing,outgoing,grn_damage,returns',
             'settling_way' => 'nullable|string|in:cash,cheque',
             'customer_id' => 'nullable|exists:customers,id',
+            'customer_short_name' => 'nullable|string|max:255',
+            'supplier_code' => 'nullable|string|max:255',
             'amount' => 'nullable|numeric',
             'description' => 'nullable|string|max:255',
             'bill_no' => 'nullable|string|max:255',
@@ -127,6 +166,9 @@ class CustomersLoanController extends Controller
             $rules['return_packs'] = 'required|numeric';
         } else {
             $rules['amount'] = 'required|numeric';
+            if (in_array($loanType, ['farmer_old', 'farmer_today'])) {
+                $rules['supplier_code'] = 'required|string|max:255';
+            }
             if ($settlingWay === 'cheque') {
                 $rules['cheque_no'] = 'required|string|max:255';
                 $rules['bank'] = 'required|string|max:255';
@@ -175,19 +217,13 @@ class CustomersLoanController extends Controller
             return response()->json(['message' => 'Return record added successfully!'], 201);
         }
 
-        // --- Handle Ingoing / Outgoing ---
-        $customerShortName = null;
-        if (!empty($validated['customer_id'])) {
-            $customer = Customer::find($validated['customer_id']);
-            if ($customer) {
-                $customerShortName = $customer->short_name;
-            }
-        }
+        // --- Resolve the customer (selected or typed-in name) ---
+        [$customerId, $customerShortName] = $this->resolveCustomer($validated);
 
         // --- Create IncomeExpenses record for all non-GRN, non-Return types ---
         $incomeExpense = new IncomeExpenses();
         $incomeExpense->loan_type = $loanType;
-        $incomeExpense->customer_id = $validated['customer_id'] ?? null;
+        $incomeExpense->customer_id = $customerId;
         $incomeExpense->description = $validated['description'];
         $incomeExpense->bill_no = $validated['bill_no'] ?? null;
         $incomeExpense->cheque_no = $validated['cheque_no'] ?? null;
@@ -195,6 +231,7 @@ class CustomersLoanController extends Controller
         $incomeExpense->cheque_date = $validated['cheque_date'] ?? null;
         $incomeExpense->settling_way = $validated['settling_way'] ?? 'cash';
         $incomeExpense->customer_short_name = $customerShortName;
+        $incomeExpense->supplier_code = $this->resolveFarmerCode($validated, $loanType);
         $incomeExpense->date = $settingDate;
         $incomeExpense->ip_address = $request->ip();
 
@@ -210,12 +247,18 @@ class CustomersLoanController extends Controller
         } elseif ($loanType === 'today') { // Customer taking a new loan
             $incomeExpense->amount = -$validated['amount'];
             $incomeExpense->type = 'expense';
+        } elseif ($loanType === 'farmer_old') { // Farmer paying back a loan
+            $incomeExpense->amount = $validated['amount'];
+            $incomeExpense->type = 'income';
+        } elseif ($loanType === 'farmer_today') { // Farmer taking a new loan
+            $incomeExpense->amount = -$validated['amount'];
+            $incomeExpense->type = 'expense';
         }
 
         $incomeExpense->save();
 
         // If it's a loan (old or today), also save to CustomersLoan table (legacy/reporting)
-        if (in_array($loanType, ['old', 'today']) && $incomeExpense->customer_id) {
+        if (in_array($loanType, ['old', 'today']) && ($incomeExpense->customer_id || $incomeExpense->customer_short_name)) {
             $loan = new CustomersLoan();
             $loan->fill($incomeExpense->getAttributes());
             $loan->amount = abs($validated['amount']); // Loans table traditionally stores absolute amount
@@ -237,9 +280,11 @@ class CustomersLoanController extends Controller
 
         // Base validation rules
         $rules = [
-            'loan_type' => 'required|string|in:old,today,ingoing,outgoing,grn_damage',
+            'loan_type' => 'required|string|in:old,today,farmer_old,farmer_today,ingoing,outgoing,grn_damage',
             'settling_way' => 'nullable|string|in:cash,cheque',
             'customer_id' => 'nullable|exists:customers,id',
+            'customer_short_name' => 'nullable|string|max:255',
+            'supplier_code' => 'nullable|string|max:255',
             'amount' => 'nullable|numeric|min:0', // Allows 0 amount for GRN
             'description' => 'required|string|max:255',
             'bill_no' => 'nullable|string|max:255',
@@ -261,9 +306,13 @@ class CustomersLoanController extends Controller
             $rules['wasted_packs'] = 'required|numeric';
             $rules['wasted_weight'] = 'required|numeric';
             $rules['description'] = 'nullable|string|max:255';
+        } elseif (in_array($request->input('loan_type'), ['farmer_old', 'farmer_today'])) {
+            $rules['amount'] = 'required|numeric';
+            $rules['supplier_code'] = 'required|string|max:255';
         } else {
             $rules['amount'] = 'required|numeric';
-            $rules['customer_id'] = 'required|exists:customers,id';
+            $rules['customer_id'] = 'nullable|required_without:customer_short_name|exists:customers,id';
+            $rules['customer_short_name'] = 'nullable|required_without:customer_id|string|max:255';
         }
 
         $validated = $request->validate($rules);
@@ -274,17 +323,11 @@ class CustomersLoanController extends Controller
         // Try to get related loan if exists
         $loan = $incomeExpense->loan_id ? CustomersLoan::find($incomeExpense->loan_id) : null;
 
-        $customerShortName = null;
-        if (!empty($validated['customer_id'])) {
-            $customer = Customer::find($validated['customer_id']);
-            if ($customer) {
-                $customerShortName = $customer->short_name;
-            }
-        }
+        [$customerId, $customerShortName] = $this->resolveCustomer($validated);
 
         // --- Update IncomeExpenses (Primary Record) ---
         $incomeExpense->loan_type = $validated['loan_type'];
-        $incomeExpense->customer_id = $validated['customer_id'] ?? null;
+        $incomeExpense->customer_id = $customerId;
         $incomeExpense->description = $validated['description'] ?? 'N/A';
         $incomeExpense->bill_no = $validated['bill_no'] ?? null;
         $incomeExpense->cheque_no = $validated['cheque_no'] ?? null;
@@ -292,12 +335,13 @@ class CustomersLoanController extends Controller
         $incomeExpense->cheque_date = $validated['cheque_date'] ?? null;
         $incomeExpense->settling_way = $validated['settling_way'] ?? 'cash';
         $incomeExpense->customer_short_name = $customerShortName;
+        $incomeExpense->supplier_code = $this->resolveFarmerCode($validated, $validated['loan_type']);
         $incomeExpense->ip_address = $request->ip();
 
-        if ($validated['loan_type'] === 'ingoing' || $validated['loan_type'] === 'old') {
+        if (in_array($validated['loan_type'], ['ingoing', 'old', 'farmer_old'])) {
             $incomeExpense->amount = $validated['amount'];
             $incomeExpense->type = 'income';
-        } elseif ($validated['loan_type'] === 'outgoing' || $validated['loan_type'] === 'today') {
+        } elseif (in_array($validated['loan_type'], ['outgoing', 'today', 'farmer_today'])) {
             $incomeExpense->amount = -$validated['amount'];
             $incomeExpense->type = 'expense';
         } elseif ($validated['loan_type'] === 'grn_damage') {
@@ -310,7 +354,12 @@ class CustomersLoanController extends Controller
         $incomeExpense->save();
 
         // --- Update CustomersLoan (Secondary Record, if linked) ---
-        if ($loan) {
+        if ($loan && !in_array($validated['loan_type'], ['old', 'today'])) {
+            // No longer a customer loan (e.g. changed to a farmer loan): drop the customer loan copy
+            $loan->delete();
+            $incomeExpense->loan_id = null;
+            $incomeExpense->save();
+        } elseif ($loan) {
             // Apply the same updates to the CustomersLoan record
             $loan->fill($incomeExpense->getAttributes());
             $loan->amount = abs($validated['amount']);
@@ -368,6 +417,62 @@ class CustomersLoanController extends Controller
         ]);
     }
 
+    /**
+     * Running loan total for a typed-in customer name (no customer record).
+     * Same sign rules as getTotalLoanAmount: negative means the customer owes money.
+     */
+    public function getTotalLoanAmountByName(Request $request): JsonResponse
+    {
+        $name = strtoupper(trim((string) $request->query('name', '')));
+
+        $totals = IncomeExpenses::where('customer_short_name', $name)
+            ->where(function ($q) {
+                $q->whereNull('status')
+                    ->orWhere('status', '!=', 'return');
+            })
+            ->selectRaw("
+                SUM(CASE WHEN loan_type = 'today' THEN amount ELSE 0 END) AS today_sum,
+                SUM(CASE WHEN loan_type = 'old' THEN amount ELSE 0 END) AS old_sum
+            ")
+            ->first();
+
+        $todaySum = (float) ($totals->today_sum ?? 0);
+        $oldSum = (float) ($totals->old_sum ?? 0);
+
+        return response()->json([
+            'old_sum' => $oldSum,
+            'today_sum' => $todaySum,
+            'total_amount' => $todaySum + $oldSum,
+        ]);
+    }
+
+    /**
+     * Running loan total for a farmer, from the farmer_old / farmer_today entries.
+     * Same sign rules as getTotalLoanAmount: negative means the farmer owes money.
+     */
+    public function getFarmerTotalLoanAmount($supplierCode): JsonResponse
+    {
+        $totals = IncomeExpenses::where('supplier_code', $supplierCode)
+            ->where(function ($q) {
+                $q->whereNull('status')
+                    ->orWhere('status', '!=', 'return');
+            })
+            ->selectRaw("
+                SUM(CASE WHEN loan_type = 'farmer_today' THEN amount ELSE 0 END) AS today_sum,
+                SUM(CASE WHEN loan_type = 'farmer_old' THEN amount ELSE 0 END) AS old_sum
+            ")
+            ->first();
+
+        $todaySum = (float) ($totals->today_sum ?? 0);
+        $oldSum = (float) ($totals->old_sum ?? 0);
+
+        return response()->json([
+            'old_sum' => $oldSum,
+            'today_sum' => $todaySum,
+            'total_amount' => $todaySum + $oldSum,
+        ]);
+    }
+
     // NEW: Get GRN Entry by Code for returns autofill.
     public function getGrnEntry($code)
     {
@@ -389,9 +494,11 @@ class CustomersLoanController extends Controller
     {
         // Base validation rules
         $rules = [
-            'loan_type' => 'required|string|in:old,today,ingoing,outgoing,grn_damage',
+            'loan_type' => 'required|string|in:old,today,farmer_old,farmer_today,ingoing,outgoing,grn_damage',
             'settling_way' => 'nullable|string|in:cash,cheque',
             'customer_id' => 'nullable|exists:customers,id',
+            'customer_short_name' => 'nullable|string|max:255',
+            'supplier_code' => 'nullable|string|max:255',
             'amount' => 'nullable|numeric|min:0',
             'description' => 'required|string|max:255',
             'bill_no' => 'nullable|string|max:255',
@@ -413,9 +520,13 @@ class CustomersLoanController extends Controller
             $rules['wasted_packs'] = 'required|numeric';
             $rules['wasted_weight'] = 'required|numeric';
             $rules['description'] = 'nullable|string|max:255';
+        } elseif (in_array($request->input('loan_type'), ['farmer_old', 'farmer_today'])) {
+            $rules['amount'] = 'required|numeric';
+            $rules['supplier_code'] = 'required|string|max:255';
         } else {
             $rules['amount'] = 'required|numeric';
-            $rules['customer_id'] = 'required|exists:customers,id';
+            $rules['customer_id'] = 'nullable|required_without:customer_short_name|exists:customers,id';
+            $rules['customer_short_name'] = 'nullable|required_without:customer_id|string|max:255';
         }
 
         try {
@@ -430,17 +541,11 @@ class CustomersLoanController extends Controller
         // Try to get related loan if exists
         $loan = $incomeExpense->loan_id ? CustomersLoan::find($incomeExpense->loan_id) : null; // Ensure correct namespace/model
 
-        $customerShortName = null;
-        if (!empty($validated['customer_id'])) {
-            $customer = Customer::find($validated['customer_id']);
-            if ($customer) {
-                $customerShortName = $customer->short_name;
-            }
-        }
+        [$customerId, $customerShortName] = $this->resolveCustomer($validated);
 
         // --- Update IncomeExpenses (Primary Record) ---
         $incomeExpense->loan_type = $validated['loan_type'];
-        $incomeExpense->customer_id = $validated['customer_id'] ?? null;
+        $incomeExpense->customer_id = $customerId;
         $incomeExpense->description = $validated['description'] ?? 'N/A';
         $incomeExpense->bill_no = $validated['bill_no'] ?? null;
         $incomeExpense->cheque_no = $validated['cheque_no'] ?? null;
@@ -448,12 +553,13 @@ class CustomersLoanController extends Controller
         $incomeExpense->cheque_date = $validated['cheque_date'] ?? null;
         $incomeExpense->settling_way = $validated['settling_way'] ?? 'cash';
         $incomeExpense->customer_short_name = $customerShortName;
+        $incomeExpense->supplier_code = $this->resolveFarmerCode($validated, $validated['loan_type']);
         $incomeExpense->ip_address = $request->ip();
 
-        if ($validated['loan_type'] === 'ingoing' || $validated['loan_type'] === 'old') {
+        if (in_array($validated['loan_type'], ['ingoing', 'old', 'farmer_old'])) {
             $incomeExpense->amount = $validated['amount'];
             $incomeExpense->type = 'income';
-        } elseif ($validated['loan_type'] === 'outgoing' || $validated['loan_type'] === 'today') {
+        } elseif (in_array($validated['loan_type'], ['outgoing', 'today', 'farmer_today'])) {
             $incomeExpense->amount = -$validated['amount'];
             $incomeExpense->type = 'expense';
         } elseif ($validated['loan_type'] === 'grn_damage') {
@@ -466,7 +572,12 @@ class CustomersLoanController extends Controller
         $incomeExpense->save();
 
         // --- Update CustomersLoan (Secondary Record, if linked) ---
-        if ($loan) {
+        if ($loan && !in_array($validated['loan_type'], ['old', 'today'])) {
+            // No longer a customer loan (e.g. changed to a farmer loan): drop the customer loan copy
+            $loan->delete();
+            $incomeExpense->loan_id = null;
+            $incomeExpense->save();
+        } elseif ($loan) {
             // Apply the same updates to the CustomersLoan record
             $loan->fill($incomeExpense->getAttributes());
             $loan->amount = abs($validated['amount']);

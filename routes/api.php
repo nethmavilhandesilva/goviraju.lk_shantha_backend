@@ -176,6 +176,8 @@ Route::middleware('auth:sanctum')->group(function () {
 
     // Utility Endpoints
     Route::get('/customers/{customerId}/loans-total', [CustomersLoanController::class, 'getTotalLoanAmount']);
+    Route::get('/farmers/{supplierCode}/loans-total', [CustomersLoanController::class, 'getFarmerTotalLoanAmount']);
+    Route::get('/customers-loans-total-by-name', [CustomersLoanController::class, 'getTotalLoanAmountByName']);
     Route::post('/settings/updateBalance', [CustomersLoanController::class, 'updateBalance']); // Assuming you'll add this method
     Route::get('/api/grn-entry/{code}', [CustomersLoanController::class, 'getGrnEntry']); // NEW: For item code autofill
     Route::get('/api/all-bill-nos', [CustomersLoanController::class, 'getAllBillNos']); // NEW: For bill no dropdown

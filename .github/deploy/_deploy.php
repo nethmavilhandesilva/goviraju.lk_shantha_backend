@@ -55,7 +55,8 @@ try {
     $app = require $base . '/bootstrap/app.php';
     $kernel = $app->make(Illuminate\Contracts\Console\Kernel::class);
 
-    $kernel->call('migrate', ['--force' => true]);
+    // Tables created outside migrations already exist on the server: only add what is missing
+    $kernel->call('migrate:safe');
     echo $kernel->output();
 
     $kernel->call('optimize:clear');

@@ -554,7 +554,7 @@ public function grnReport2(Request $request)
     public function financialReport()
     {
         // Fetch today's Income/Expenses records
-        $records = IncomeExpenses::select('customer_short_name', 'bill_no', 'description', 'amount', 'loan_type')
+        $records = IncomeExpenses::select('customer_short_name', 'supplier_code', 'bill_no', 'description', 'amount', 'loan_type')
             ->whereDate('created_at', Carbon::today())
             ->get();
 
@@ -582,17 +582,17 @@ public function grnReport2(Request $request)
             $cr = null;
 
             // Build description
-            $desc = $record->customer_short_name;
+            $desc = $record->customer_short_name ?? $record->supplier_code;
             if (!empty($record->bill_no)) {
                 $desc .= " ({$record->bill_no})";
             }
             $desc .= " - {$record->description}";
 
             // Determine DR or CR based on loan_type
-            if (in_array($record->loan_type, ['old', 'ingoing'])) {
+            if (in_array($record->loan_type, ['old', 'farmer_old', 'ingoing'])) {
                 $dr = $record->amount;
                 $totalDr += $record->amount;
-            } elseif (in_array($record->loan_type, ['today', 'outgoing'])) {
+            } elseif (in_array($record->loan_type, ['today', 'farmer_today', 'outgoing'])) {
                 $cr = $record->amount;
                 $totalCr += $record->amount;
             }
@@ -1189,7 +1189,7 @@ public function grnReport2(Request $request)
         // Fetch records from the database
         $settingDate = Setting::value('value');
 
-        $records = IncomeExpenses::select('customer_short_name', 'bill_no', 'description', 'amount', 'loan_type')
+        $records = IncomeExpenses::select('customer_short_name', 'supplier_code', 'bill_no', 'description', 'amount', 'loan_type')
             ->whereDate('created_at', $settingDate)
             ->get();
 
@@ -1199,7 +1199,7 @@ public function grnReport2(Request $request)
             $cr = null;
 
             // Use null coalescing to provide default values for potentially null fields
-            $customerShortName = $record->customer_short_name ?? 'N/A';
+            $customerShortName = $record->customer_short_name ?? $record->supplier_code ?? 'N/A';
             $billNo = $record->bill_no ?? '';
             $itemDescription = $record->description ?? 'No Description';
             $amount = $record->amount ?? 0;
@@ -1211,10 +1211,10 @@ public function grnReport2(Request $request)
             }
             $desc .= " - {$itemDescription}";
 
-            if (in_array($loanType, ['old', 'ingoing'])) {
+            if (in_array($loanType, ['old', 'farmer_old', 'ingoing'])) {
                 $dr = $amount;
                 $totalDr += $amount;
-            } elseif (in_array($loanType, ['today', 'outgoing'])) {
+            } elseif (in_array($loanType, ['today', 'farmer_today', 'outgoing'])) {
                 $cr = $amount;
                 $totalCr += $amount;
             }
@@ -1531,7 +1531,7 @@ public function grnReport2(Request $request)
             ->get();
 
         // --- Financial Report ---
-        $financialRecords = IncomeExpenses::select('customer_short_name', 'bill_no', 'description', 'amount', 'loan_type')
+        $financialRecords = IncomeExpenses::select('customer_short_name', 'supplier_code', 'bill_no', 'description', 'amount', 'loan_type')
             ->whereDate('Date', $settingDate)
             ->get() ?? collect([]);
 
@@ -1540,15 +1540,15 @@ public function grnReport2(Request $request)
 
         foreach ($financialRecords as $record) {
             $dr = $cr = null;
-            $desc = $record->customer_short_name;
+            $desc = $record->customer_short_name ?? $record->supplier_code;
             if (!empty($record->bill_no))
                 $desc .= " ({$record->bill_no})";
             $desc .= " - {$record->description}";
 
-            if (in_array($record->loan_type, ['old', 'ingoing'])) {
+            if (in_array($record->loan_type, ['old', 'farmer_old', 'ingoing'])) {
                 $dr = $record->amount;
                 $totalDr += $record->amount;
-            } elseif (in_array($record->loan_type, ['today', 'outgoing'])) {
+            } elseif (in_array($record->loan_type, ['today', 'farmer_today', 'outgoing'])) {
                 $cr = $record->amount;
                 $totalCr += $record->amount;
             }

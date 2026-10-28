@@ -16,6 +16,7 @@ class AuthController extends Controller
             'name'     => 'required|string|max:255',
             'user_id'  => 'required|string|max:255|unique:users,user_id',
             'password' => 'required|string|min:6|confirmed', // expects password_confirmation
+            'password2' => 'required|string|min:6|confirmed', // second password, expects password2_confirmation
             'role'     => 'nullable|string',
         ]);
 
@@ -24,6 +25,7 @@ class AuthController extends Controller
             'user_id'    => $request->user_id,
             'email'      => $request->email ?? null,
             'password'   => Hash::make($request->password),
+            'password2'  => Hash::make($request->password2),
             'role'       => $request->role ?? 'User',
             'ip_address' => $request->ip(),
         ]);
@@ -43,6 +45,7 @@ class AuthController extends Controller
     $request->validate([
         'user_id'  => 'required|string',
         'password' => 'required|string',
+        'password2' => 'nullable|string',
     ]);
 
     $user = User::where('user_id', $request->user_id)->first();
@@ -50,6 +53,14 @@ class AuthController extends Controller
     if (!$user || !Hash::check($request->password, $user->password)) {
         throw ValidationException::withMessages([
             'user_id' => ['The provided credentials are incorrect.']
+        ]);
+    }
+
+    // Users with a second password must also enter it correctly.
+    // Users without one (not set yet) log in with the first password only.
+    if (!empty($user->password2) && !Hash::check((string) $request->password2, $user->password2)) {
+        throw ValidationException::withMessages([
+            'password2' => ['The second password is incorrect.']
         ]);
     }
 

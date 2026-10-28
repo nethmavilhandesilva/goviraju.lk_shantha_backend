@@ -19,7 +19,7 @@ class ReportController2 extends Controller
         $dates = Setting::pluck('value')->toArray();
 
         // Fetch Income/Expenses filtered by dates
-        $records = IncomeExpenses::select('customer_short_name', 'bill_no', 'description', 'amount', 'loan_type')
+        $records = IncomeExpenses::select('customer_short_name', 'supplier_code', 'bill_no', 'description', 'amount', 'loan_type')
             ->whereIn('Date', $dates)
             ->get();
 
@@ -57,10 +57,10 @@ class ReportController2 extends Controller
             }
             $desc .= " - {$record->description}";
 
-            if (in_array($record->loan_type, ['old', 'ingoing'])) {
+            if (in_array($record->loan_type, ['old', 'farmer_old', 'ingoing'])) {
                 $dr = (float)$record->amount;
                 $totalDr += (float)$record->amount;
-            } elseif (in_array($record->loan_type, ['today', 'outgoing'])) {
+            } elseif (in_array($record->loan_type, ['today', 'farmer_today', 'outgoing'])) {
                 $cr = (float)$record->amount;
                 $totalCr += (float)$record->amount;
             }
