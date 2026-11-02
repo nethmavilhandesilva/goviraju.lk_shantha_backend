@@ -143,6 +143,8 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::put('/sales/{sale}', [SalesEntryController::class, 'update']);
     Route::delete('/sales/{sale}', [SalesEntryController::class, 'destroy']);
     Route::post('/sales/mark-printed', [SalesEntryController::class, 'markAsPrinted']);
+    Route::post('/sales/confirm-print', [SalesEntryController::class, 'confirmPrint']);
+    Route::post('/sales/cancel-print', [SalesEntryController::class, 'cancelPrint']);
     Route::post('/sales/mark-all-processed', [SalesEntryController::class, 'markAllAsProcessed']);
     Route::put('/sales/{sale}/given-amount', [SalesEntryController::class, 'updateGivenAmount']);
 
@@ -158,6 +160,8 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::get('sales/profit-by-supplier', [SupplierController::class, 'getProfitBySupplier']);
     //supplier bill no
     Route::post('/suppliers/mark-as-printed', [SupplierController::class, 'marksuppliers']);
+    Route::post('/suppliers/confirm-print', [SupplierController::class, 'confirmPrint']);
+    Route::post('/suppliers/cancel-print', [SupplierController::class, 'cancelPrint']);
     Route::get('/suppliers/bill/{billNo}/details', [SupplierController::class, 'getBillDetails']);
     Route::get('/suppliers/{supplierCode}/unprinted-details', [SupplierController::class, 'getUnprintedDetails']);
     Route::get('/suppliers/{supplierCode}/unprinted-details2', [SupplierController::class, 'getUnprintedDetails2']);

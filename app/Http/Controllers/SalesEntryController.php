@@ -19,6 +19,7 @@ use App\Models\CustomersLoan;
 use Illuminate\Http\JsonResponse;
 use App\Models\Commission;
 use Illuminate\Support\Str;
+use Illuminate\Support\Facades\Cache;
 use Twilio\Rest\Client;
 use TextLK\SMS\TextLKSMSMessage;
 /* 
@@ -415,6 +416,10 @@ class SalesEntryController extends Controller
             return response()->json(['status' => 'error', 'message' => 'No sales IDs provided.'], 400);
         }
 
+        // defer_sms: the page prints first and then calls confirm-print (send SMS) or
+        // cancel-print (put the bill back to unprinted). Without it: old behaviour.
+        $deferSms = $request->boolean('defer_sms');
+
         try {
 
             // 1. ✅ HANDLE BILL NUMBER GENERATION
@@ -423,16 +428,30 @@ class SalesEntryController extends Controller
                 ->whereNotNull('bill_no')
                 ->first()?->bill_no;
 
+            $isNewBillNo = !$existingBillNo;
             $billNoToUse = $existingBillNo ?: $this->generateNewBillNumber();
 
             $salesRecords = null;
+            $previousState = [];
 
             // 2. ✅ UPDATE SALES RECORDS IN TRANSACTION
-            DB::transaction(function () use ($salesIds, $billNoToUse, &$salesRecords) {
+            DB::transaction(function () use ($salesIds, $billNoToUse, &$salesRecords, &$previousState) {
 
                 $salesRecords = Sale::whereIn('id', $salesIds)->get();
 
                 foreach ($salesRecords as $sale) {
+
+                    // Remember the state before printing so a cancelled print can be undone
+                    $previousState[] = [
+                        'id' => $sale->id,
+                        'bill_printed' => $sale->bill_printed,
+                        // The column is "Processed"; read it whichever way the attribute is keyed
+                        'processed' => $sale->getAttribute('Processed') ?? $sale->getAttribute('processed'),
+                        'bill_no' => $sale->bill_no,
+                        'FirstTimeBillPrintedOn' => $sale->FirstTimeBillPrintedOn,
+                        // The column is "BillReprintAfterchanges" (lower-case c)
+                        'BillReprintAfterChanges' => $sale->getAttribute('BillReprintAfterchanges') ?? $sale->getAttribute('BillReprintAfterChanges'),
+                    ];
 
                     if ($sale->bill_printed === 'Y') {
                         $sale->BillReprintAfterChanges = now();
@@ -445,25 +464,6 @@ class SalesEntryController extends Controller
                     $sale->save();
                 }
             });
-
-            // 3. ✅ GENERATE ITEM SUMMARY + BILL FINAL TOTAL
-            $itemsForSummary = Sale::whereIn('id', $salesIds)->get();
-
-            // ✅ Bill Final Total (total + CustomerPackCost)
-            $billFinalTotal = $itemsForSummary->sum(function ($item) {
-                return (float) $item->total + (float) $item->CustomerPackCost;
-            });
-
-            // ✅ Group summary
-            $summaryString = $itemsForSummary->groupBy('item_code')->map(function ($group) {
-
-                $itemName = $group->first()->item_name;
-                $itemCode = $group->first()->item_code;
-                $totalWeight = $group->sum('weight');
-                $totalPacks = $group->sum('packs');
-
-                return "{$itemName}({$itemCode})={$totalWeight}/{$totalPacks}";
-            })->implode("\n");
 
             // ✅ FIX: Prepare sales data from actual database records, NOT from request
             $formattedSalesData = [];
@@ -486,7 +486,7 @@ class SalesEntryController extends Controller
                 ];
             }
 
-            // 4. ✅ CREATE PUBLIC BILL LINK WITH ACTUAL SALES DATA
+            // 3. ✅ CREATE PUBLIC BILL LINK WITH ACTUAL SALES DATA
             $token = Str::random(40);
             $baseUrl = env('APP_FRONTEND_URL', 'https://goviraju.lk/DBS_30500/');
             $publicUrl = rtrim($baseUrl, '/') . "/view-bill/" . $token;
@@ -501,66 +501,39 @@ class SalesEntryController extends Controller
                 'updated_at' => now()
             ]);
 
-            // 5. ✅ RESOLVE TELEPHONE NUMBER
-            $to = $request->telephone_no;
-
+            // 4. ✅ RESOLVE TELEPHONE NUMBER
             $customerCode = $request->customer_code
                 ?? $request->customer_name
                 ?? ($salesRecords->first()->customer_code ?? null);
 
-            if (empty($to) && !empty($customerCode)) {
+            $smsContext = [
+                'sales_ids' => $salesIds,
+                'bill_no' => $billNoToUse,
+                'public_url' => $publicUrl,
+                'telephone_no' => $request->telephone_no,
+                'customer_code' => $customerCode,
+            ];
 
-                $customer = Customer::where('short_name', $customerCode)->first();
+            if ($deferSms) {
+                // Kept for 1 hour: enough for the print dialog + the "did it print?" answer
+                Cache::put("sales-print:{$token}", [
+                    'previous' => $previousState,
+                    'bill_no' => $billNoToUse,
+                    'is_new_bill_no' => $isNewBillNo,
+                    'sms' => $smsContext,
+                ], now()->addHour());
 
-                if ($customer) {
-                    $to = $customer->telephone_no;
-                }
+                return response()->json([
+                    'status' => 'success',
+                    'message' => 'Sales marked as printed; waiting for print confirmation.',
+                    'bill_no' => $billNoToUse,
+                    'bill_link' => $publicUrl,
+                    'print_token' => $token,
+                ]);
             }
 
-            // 6. ✅ SEND SMS VIA TEXT.LK
-            if (!empty($to)) {
-
-                try {
-
-                    // ✅ Clean number: remove +, spaces, dashes
-                    $to = preg_replace('/[^0-9]/', '', $to);
-
-                    // ✅ Convert 07XXXXXXXX -> 947XXXXXXXX
-                    if (str_starts_with($to, '0')) {
-                        $to = '94' . substr($to, 1);
-                    }
-
-                    // ✅ UPDATED MESSAGE BODY WITH BILL FINAL TOTAL
-                    $messageBody =
-                        "Customer Bill,\n" .
-                        "Hello {$customerCode},\n" .
-                        "Bill #{$billNoToUse} Summary:\n" .
-                        "{$summaryString}\n" .
-                        "Bill Final Total: " . number_format($billFinalTotal, 2) . "\n" .
-                        "View: {$publicUrl}";
-
-                    $textLKSMS = new TextLKSMSMessage();
-
-                    $result = $textLKSMS->recipient($to)
-                        ->message($messageBody)
-                        ->senderId(env('TEXTLK_SENDER_ID', 'TextLKDemo'))
-                        ->apiKey(env('TEXTLK_API_KEY'))
-                        ->send();
-
-                    if ($result) {
-                        Log::info("Text.lk SMS sent successfully to: " . $to);
-                    } else {
-                        Log::error("Text.lk SMS failed to send to: " . $to);
-                    }
-
-                } catch (\Exception $e) {
-
-                    Log::error("=== TEXT.LK SMS SENDING FAILED ===");
-                    Log::error("Target Number: " . $to);
-                    Log::error("Error Message: " . $e->getMessage());
-                    Log::error("=================================");
-                }
-            }
+            // 5. ✅ SEND SMS VIA TEXT.LK
+            $this->sendCustomerBillSms($smsContext);
 
             return response()->json([
                 'status' => 'success',
@@ -579,6 +552,164 @@ class SalesEntryController extends Controller
             ], 500);
         }
     }
+
+    /**
+     * The bill printed (user answered "yes" after the print dialog): send the SMS.
+     */
+    public function confirmPrint(Request $request)
+    {
+        $request->validate(['print_token' => 'required|string']);
+
+        $pending = Cache::pull("sales-print:{$request->print_token}");
+        if (!$pending) {
+            return response()->json(['status' => 'error', 'message' => 'Print request not found or expired.'], 404);
+        }
+
+        $this->sendCustomerBillSms($pending['sms']);
+
+        return response()->json(['status' => 'success', 'bill_no' => $pending['bill_no']]);
+    }
+
+    /**
+     * The bill did not print (user answered "no"): put the records back in the
+     * unprinted section, remove the bill link, and free the bill number if possible.
+     * Bills that were already printed before (reprints) keep their printed state.
+     */
+    public function cancelPrint(Request $request)
+    {
+        $request->validate(['print_token' => 'required|string']);
+
+        $pending = Cache::get("sales-print:{$request->print_token}");
+        if (!$pending) {
+            return response()->json(['status' => 'error', 'message' => 'Print request not found or expired.'], 404);
+        }
+
+        DB::transaction(function () use ($pending, $request) {
+            foreach ($pending['previous'] as $prev) {
+                $sale = Sale::find($prev['id']);
+                if (!$sale) {
+                    continue;
+                }
+
+                $wasPrinted = $prev['bill_printed'] === 'Y';
+                $sale->bill_printed = $wasPrinted ? 'Y' : 'N'; // new or unprinted -> unprinted section
+                $sale->processed = $wasPrinted ? ($prev['processed'] ?? 'Y') : 'Y';
+                $sale->bill_no = $prev['bill_no'];
+                $sale->FirstTimeBillPrintedOn = $prev['FirstTimeBillPrintedOn'];
+                $sale->BillReprintAfterChanges = $prev['BillReprintAfterChanges'];
+                $sale->save();
+            }
+
+            DB::table('bill_links')->where('token', $request->print_token)->delete();
+
+            // Give the bill number back if nothing has used a later number since
+            if ($pending['is_new_bill_no']) {
+                $counter = \App\Models\BillNumber::lockForUpdate()->first();
+                if ($counter && (string) $counter->last_bill_no === (string) $pending['bill_no']) {
+                    $counter->last_bill_no -= 1;
+                    $counter->save();
+                }
+            }
+        });
+
+        Cache::forget("sales-print:{$request->print_token}");
+
+        return response()->json(['status' => 'success', 'message' => 'Bill moved back to unprinted.']);
+    }
+
+    /**
+     * Customer bill SMS (Text.lk) with item summary, bill total and public bill link.
+     */
+    private function sendCustomerBillSms(array $context): void
+    {
+        $salesIds = $context['sales_ids'];
+        $billNoToUse = $context['bill_no'];
+        $publicUrl = $context['public_url'];
+        $customerCode = $context['customer_code'];
+
+        // ✅ RESOLVE TELEPHONE NUMBER
+        $to = $context['telephone_no'];
+
+        if (empty($to) && !empty($customerCode)) {
+
+            $customer = Customer::where('short_name', $customerCode)->first();
+
+            if ($customer) {
+                $to = $customer->telephone_no;
+            }
+        }
+
+        if (empty($to)) {
+            return;
+        }
+
+        if (empty(env('TEXTLK_API_KEY'))) {
+            Log::warning("Text.lk API key not set in .env, customer bill SMS not sent", ['bill_no' => $billNoToUse]);
+            return;
+        }
+
+        // ✅ GENERATE ITEM SUMMARY + BILL FINAL TOTAL
+        $itemsForSummary = Sale::whereIn('id', $salesIds)->get();
+
+        // ✅ Bill Final Total (total + CustomerPackCost)
+        $billFinalTotal = $itemsForSummary->sum(function ($item) {
+            return (float) $item->total + (float) $item->CustomerPackCost;
+        });
+
+        // ✅ Group summary
+        $summaryString = $itemsForSummary->groupBy('item_code')->map(function ($group) {
+
+            $itemName = $group->first()->item_name;
+            $itemCode = $group->first()->item_code;
+            $totalWeight = $group->sum('weight');
+            $totalPacks = $group->sum('packs');
+
+            return "{$itemName}({$itemCode})={$totalWeight}/{$totalPacks}";
+        })->implode("\n");
+
+        // ✅ SEND SMS VIA TEXT.LK
+        try {
+
+            // ✅ Clean number: remove +, spaces, dashes
+            $to = preg_replace('/[^0-9]/', '', $to);
+
+            // ✅ Convert 07XXXXXXXX -> 947XXXXXXXX
+            if (str_starts_with($to, '0')) {
+                $to = '94' . substr($to, 1);
+            }
+
+            // ✅ UPDATED MESSAGE BODY WITH BILL FINAL TOTAL
+            $messageBody =
+                "Customer Bill,\n" .
+                "Hello {$customerCode},\n" .
+                "Bill #{$billNoToUse} Summary:\n" .
+                "{$summaryString}\n" .
+                "Bill Final Total: " . number_format($billFinalTotal, 2) . "\n" .
+                "View: {$publicUrl}";
+
+            $textLKSMS = new TextLKSMSMessage();
+
+            $result = $textLKSMS->recipient($to)
+                ->message($messageBody)
+                ->senderId(env('TEXTLK_SENDER_ID', 'TextLKDemo'))
+                ->apiKey(env('TEXTLK_API_KEY'))
+                ->send();
+
+            if ($result) {
+                Log::info("Text.lk SMS sent successfully to: " . $to);
+            } else {
+                Log::error("Text.lk SMS failed to send to: " . $to);
+            }
+
+        } catch (\Exception $e) {
+
+            Log::error("=== TEXT.LK SMS SENDING FAILED ===");
+            Log::error("Target Number: " . $to);
+            Log::error("Error Message: " . $e->getMessage());
+            Log::error("=================================");
+        }
+    }
+
     private function generateNewBillNumber()
     {
         return \DB::transaction(function () {

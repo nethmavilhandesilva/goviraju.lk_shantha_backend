@@ -11,6 +11,7 @@ use App\Models\SupplierBillNumber;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Str;
+use Illuminate\Support\Facades\Cache;
 
 class SupplierController extends Controller
 {
@@ -333,6 +334,10 @@ public function generateFSeriesBill(): JsonResponse
 
     $ids = $validated['transaction_ids'];
 
+    // defer_sms: the page prints first and then calls confirm-print (send SMS) or
+    // cancel-print (put the bill back to unprinted). Without it: old behaviour.
+    $deferSms = $request->boolean('defer_sms');
+
     try {
         DB::beginTransaction();
         \Log::info('Transaction started', ['ids' => $ids]);
@@ -344,13 +349,23 @@ public function generateFSeriesBill(): JsonResponse
             throw new \Exception('Supplier bill counter not found');
         }
         
-        $finalBillNo = $counter->prefix . ($counter->last_number + 1);
+        $billNumber = $counter->last_number + 1;
+        $finalBillNo = $counter->prefix . $billNumber;
         $counter->increment('last_number');
         \Log::info('Bill number generated', ['bill_no' => $finalBillNo]);
 
         // 2. Snapshot current data for the public link
         $salesRecords = $this->dropGramsFromWeights(Sale::whereIn('id', $ids)->get());
         \Log::info('Sales records fetched', ['count' => $salesRecords->count()]);
+
+        // Remember the state before printing so a cancelled print can be undone
+        $previousState = Sale::whereIn('id', $ids)
+            ->get(['id', 'supplier_bill_printed', 'supplier_bill_no'])
+            ->map(fn ($sale) => [
+                'id' => $sale->id,
+                'supplier_bill_printed' => $sale->supplier_bill_printed,
+                'supplier_bill_no' => $sale->supplier_bill_no,
+            ])->all();
 
         // 3. Mark records as printed
         $updated = Sale::whereIn('id', $ids)->update([
@@ -373,6 +388,18 @@ public function generateFSeriesBill(): JsonResponse
 
         DB::commit();
         \Log::info('Transaction committed');
+
+        if ($deferSms) {
+            // Kept for 1 hour: enough for the print dialog + the "did it print?" answer
+            Cache::put("supplier-print:{$token}", [
+                'previous' => $previousState,
+                'bill_no' => $finalBillNo,
+                'bill_number' => $billNumber,
+                'validated' => $validated,
+            ], now()->addHour());
+
+            return response()->json(['new_bill_no' => $finalBillNo, 'token' => $token, 'print_token' => $token, 'sms' => 'pending_print']);
+        }
 
         // 5. SEND SMS VIA TEXT.LK - after the response, so the bill prints first.
         //    Skipped when there is no phone number or no Text.lk credentials in .env.
@@ -400,6 +427,72 @@ public function generateFSeriesBill(): JsonResponse
         ]);
         return response()->json(['error' => $e->getMessage()], 500);
     }
+}
+
+/**
+ * The bill printed (user answered "yes" after the print dialog): send the SMS,
+ * after the response and only when Text.lk is configured.
+ */
+public function confirmPrint(Request $request)
+{
+    $request->validate(['print_token' => 'required|string']);
+
+    $pending = Cache::pull("supplier-print:{$request->print_token}");
+    if (!$pending) {
+        return response()->json(['error' => 'Print request not found or expired.'], 404);
+    }
+
+    $validated = $pending['validated'];
+
+    if (empty($validated['telephone_no'])) {
+        return response()->json(['sms' => 'skipped_no_phone']);
+    }
+    if (!$this->smsCredentialsConfigured()) {
+        \Log::warning('Text.lk credentials not set in .env, SMS not sent', ['bill_no' => $pending['bill_no']]);
+        return response()->json(['sms' => 'skipped_no_credentials']);
+    }
+
+    $salesRecords = $this->dropGramsFromWeights(Sale::whereIn('id', $validated['transaction_ids'])->get());
+    $this->sendSmsAfterResponse(
+        fn () => $this->sendTextLKSMS($validated, $pending['bill_no'], $salesRecords, $request->print_token),
+        ['bill_no' => $pending['bill_no'], 'telephone' => $validated['telephone_no']]
+    );
+
+    return response()->json(['sms' => 'queued']);
+}
+
+/**
+ * The bill did not print (user answered "no"): put the records back in the unprinted
+ * section, remove the bill link, and free the bill number if nothing used a later one.
+ */
+public function cancelPrint(Request $request)
+{
+    $request->validate(['print_token' => 'required|string']);
+
+    $pending = Cache::get("supplier-print:{$request->print_token}");
+    if (!$pending) {
+        return response()->json(['error' => 'Print request not found or expired.'], 404);
+    }
+
+    DB::transaction(function () use ($pending, $request) {
+        foreach ($pending['previous'] as $prev) {
+            Sale::where('id', $prev['id'])->update([
+                'supplier_bill_printed' => $prev['supplier_bill_printed'] === 'Y' ? 'Y' : 'N',
+                'supplier_bill_no' => $prev['supplier_bill_no'],
+            ]);
+        }
+
+        DB::table('supplier_bill_links')->where('token', $request->print_token)->delete();
+
+        $counter = SupplierBillNumber::where('id', 1)->lockForUpdate()->first();
+        if ($counter && (int) $counter->last_number === (int) $pending['bill_number']) {
+            $counter->decrement('last_number');
+        }
+    });
+
+    Cache::forget("supplier-print:{$request->print_token}");
+
+    return response()->json(['message' => 'Bill moved back to unprinted.']);
 }
 
 private function sendTextLKSMS($data, $billNo, $records, $token)
