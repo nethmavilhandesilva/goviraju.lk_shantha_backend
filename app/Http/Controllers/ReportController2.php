@@ -24,6 +24,7 @@ class ReportController2 extends Controller
             ->get();
 
         $reportData = [];
+        $loanRows = [];
         $totalDr = 0;
         $totalCr = 0;
 
@@ -70,6 +71,14 @@ class ReportController2 extends Controller
                 'dr' => $dr,
                 'cr' => $cr
             ];
+
+            if ($dr !== null || $cr !== null) {
+                $loanRows[] = [
+                    'description' => $desc,
+                    'received' => $dr,
+                    'paid' => $cr
+                ];
+            }
         }
 
         // 🧮 Sales Total
@@ -89,6 +98,10 @@ class ReportController2 extends Controller
             'dr' => null,
             'cr' => (float)$supplierTotalCost
         ];
+
+        // 💰 Commission profit: what customers paid minus what farmers get, over all records
+        $commissionProfit = (float)$salesTotal - (float)$supplierTotalCost;
+        $kuliyaTotal = (float)Sale::sum('Kuliya');
 
         // 💰 Profit Calculation
         $sales = Sale::all();
@@ -181,6 +194,9 @@ class ReportController2 extends Controller
                 'totalCr' => $totalCr,
                 'salesTotal' => (float)$salesTotal,
                 'supplierTotalCost' => (float)$supplierTotalCost, // NEW: Add this to response
+                'commissionProfit' => $commissionProfit,
+                'kuliyaTotal' => $kuliyaTotal,
+                'loanRows' => $loanRows,
                 'totalProfit' => $totalProfit,
                 'profitDetails' => $profitDetails,
                 'totalDamages' => (float)$totalDamages,
