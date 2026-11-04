@@ -300,22 +300,7 @@ class SalesEntryController extends Controller
             // ---------- COMMISSION & PROFIT ----------
             $commissionAmount = 0.00;
 
-            $commissionRule = Commission::where('item_code', $validated['item_code'])
-                ->where('starting_price', '<=', $pricePerKg)
-                ->where('end_price', '>=', $pricePerKg)
-                ->first()
-                ?? Commission::where('supplier_code', $validated['supplier_code'])
-                    ->where('starting_price', '<=', $pricePerKg)
-                    ->where('end_price', '>=', $pricePerKg)
-                    ->first()
-                ?? Commission::where('type', 'Z')
-                    ->where('starting_price', '<=', $pricePerKg)
-                    ->where('end_price', '>=', $pricePerKg)
-                    ->first();
-
-            if ($commissionRule) {
-                $commissionAmount = $commissionRule->commission_amount;
-            }
+            $commissionAmount = $this->findCommissionAmount($validated['item_code'], $validated['supplier_code'], $pricePerKg);
 
             $customerPackCost = $item->pack_cost ?? 0;
             $customerPackLabour = $item->pack_due ?? 0;
@@ -766,24 +751,11 @@ class SalesEntryController extends Controller
             $newBagPrice = (float) ($item->pack_cost ?? 0);
 
             // --- 3. Commission Rule Logic ---
-            $commissionRule = Commission::where('item_code', $validatedData['item_code'])
-                ->where('starting_price', '<=', $newPricePerKg)
-                ->where('end_price', '>=', $newPricePerKg)
-                ->orWhere(function ($query) use ($validatedData, $sale, $newPricePerKg) {
-                    $query->where('supplier_code', $validatedData['supplier_code'] ?? $sale->supplier_code)
-                        ->where('starting_price', '<=', $newPricePerKg)
-                        ->where('end_price', '>=', $newPricePerKg);
-                })
-                ->orWhere(function ($query) use ($newPricePerKg) {
-                    $query->where('type', 'Z')
-                        ->where('starting_price', '<=', $newPricePerKg)
-                        ->where('end_price', '>=', $newPricePerKg);
-                })
-                ->first();
-
-            if ($commissionRule) {
-                $commissionAmount = $commissionRule->commission_amount;
-            }
+            $commissionAmount = $this->findCommissionAmount(
+                $validatedData['item_code'],
+                $validatedData['supplier_code'] ?? $sale->supplier_code,
+                $newPricePerKg
+            );
 
             // --- 4. Main Record Calculations ---
             $supplierPricePerKg = abs($newPricePerKg - $commissionAmount);
@@ -969,7 +941,49 @@ class SalesEntryController extends Controller
             return response()->json(['success' => false, 'message' => $e->getMessage()], 500);
         }
     }
- private function calculateKuliya($itemCode, $itemName, $weight)
+ /**
+ * Commission per kg for a sale price, from the commissions table.
+ * Item rules win over supplier rules, which win over the general (Z) rules.
+ * A price between two bands (e.g. 9.50 between 1-9 and 10-19) uses the lower band,
+ * and an empty end price means "and above".
+ */
+private function findCommissionAmount($itemCode, $supplierCode, $pricePerKg): float
+{
+    $price = (float) $pricePerKg;
+    if ($price <= 0) {
+        return 0.00;
+    }
+
+    $inBand = function ($query) use ($price) {
+        $query->where(function ($q) use ($price) {
+            $q->whereNull('starting_price')->orWhere('starting_price', '<=', $price);
+        })->where(function ($q) use ($price) {
+            $q->whereNull('end_price')->orWhere('end_price', '>=', floor($price));
+        });
+    };
+
+    $scopes = [
+        fn ($q) => $q->where('type', 'T')->where('item_code', $itemCode),
+        fn ($q) => $q->where('type', 'S')->where('supplier_code', $supplierCode),
+        fn ($q) => $q->where('type', 'Z'),
+    ];
+
+    foreach ($scopes as $scope) {
+        $rule = Commission::query()
+            ->tap($scope)
+            ->where($inBand)
+            ->orderByDesc('starting_price')
+            ->first();
+
+        if ($rule) {
+            return (float) $rule->commission_amount;
+        }
+    }
+
+    return 0.00;
+}
+
+private function calculateKuliya($itemCode, $itemName, $weight)
 {
     // If item code is CAA, kuliya = 1.50
     if ($itemCode === 'CAA') {
