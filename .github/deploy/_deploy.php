@@ -62,6 +62,12 @@ try {
     $kernel->call('optimize:clear');
     echo $kernel->output();
 
+    // Make PHP load the newly uploaded code instead of cached copies of the old files
+    if (function_exists('opcache_reset')) {
+        opcache_reset();
+        echo "OPcache cleared\n";
+    }
+
     if (! file_exists($base . '/public/storage')) {
         $kernel->call('storage:link');
         echo $kernel->output();

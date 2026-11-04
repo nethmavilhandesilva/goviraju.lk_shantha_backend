@@ -943,9 +943,10 @@ class SalesEntryController extends Controller
     }
  /**
  * Commission per kg for a sale price, from the commissions table.
- * Item rules win over supplier rules, which win over the general (Z) rules.
- * A price between two bands (e.g. 9.50 between 1-9 and 10-19) uses the lower band,
- * and an empty end price means "and above".
+ * Item rules win over supplier rules, which win over the general rules.
+ * Rules are told apart by which codes are filled in (not the type column), a price
+ * between two bands (e.g. 9.50 between 1-9 and 10-19) uses the lower band, and an
+ * empty or 0 end price means "and above".
  */
 private function findCommissionAmount($itemCode, $supplierCode, $pricePerKg): float
 {
@@ -954,18 +955,23 @@ private function findCommissionAmount($itemCode, $supplierCode, $pricePerKg): fl
         return 0.00;
     }
 
+    $blank = fn ($column) => fn ($q) => $q->whereNull($column)->orWhere($column, '');
+
     $inBand = function ($query) use ($price) {
         $query->where(function ($q) use ($price) {
             $q->whereNull('starting_price')->orWhere('starting_price', '<=', $price);
         })->where(function ($q) use ($price) {
-            $q->whereNull('end_price')->orWhere('end_price', '>=', floor($price));
+            $q->whereNull('end_price')
+                ->orWhere('end_price', '<=', 0)
+                ->orWhereColumn('end_price', '<', 'starting_price')
+                ->orWhere('end_price', '>=', floor($price));
         });
     };
 
     $scopes = [
-        fn ($q) => $q->where('type', 'T')->where('item_code', $itemCode),
-        fn ($q) => $q->where('type', 'S')->where('supplier_code', $supplierCode),
-        fn ($q) => $q->where('type', 'Z'),
+        fn ($q) => $q->where('item_code', trim((string) $itemCode)),
+        fn ($q) => $q->where('supplier_code', trim((string) $supplierCode))->where($blank('item_code')),
+        fn ($q) => $q->where($blank('item_code'))->where($blank('supplier_code')),
     ];
 
     foreach ($scopes as $scope) {
