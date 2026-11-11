@@ -946,15 +946,15 @@ class SalesEntryController extends Controller
  * Commission per kg for a sale price.
  *
  * Lookup order:
- *   1. commissions table rule for this item code
- *   2. commissions table rule for this supplier code
- *   3. built-in default bands (App\Support\DefaultCommissions) - applied by default
- *   4. commissions table general rules (no item/supplier) - only for prices the
- *      built-in bands do not cover
+ *   1. commissions table rule for this item code (price within its range)
+ *   2. commissions table rule for this supplier code (price within its range)
+ *   3. built-in default bands (App\Support\DefaultCommissions)
  *
- * Table rules are told apart by which codes are filled in (not the type column), a price
- * between two bands (e.g. 9.50 between 1-9 and 10-19) uses the lower band, and an
- * empty or 0 end price means "and above". If the table cannot be read the built-in
+ * Rows in the commissions table with neither an item code nor a supplier code are
+ * not used; the built-in bands are the only general commissions. Table rules are
+ * told apart by which codes are filled in (not the type column), a price between
+ * two bands (e.g. 9.50 between 1-9 and 10-19) uses the lower band, and an empty
+ * or 0 end price means "and above". If the table cannot be read the built-in
  * bands are still used.
  */
 private function findCommissionAmount($itemCode, $supplierCode, $pricePerKg): float
@@ -968,7 +968,6 @@ private function findCommissionAmount($itemCode, $supplierCode, $pricePerKg): fl
 
     $itemScope = fn ($q) => $q->where('item_code', trim((string) $itemCode));
     $supplierScope = fn ($q) => $q->where('supplier_code', trim((string) $supplierCode))->where($blank('item_code'));
-    $generalScope = fn ($q) => $q->where($blank('item_code'))->where($blank('supplier_code'));
 
     foreach ([$itemScope, $supplierScope] as $scope) {
         $amount = $this->commissionFromTable($scope, $price);
@@ -977,12 +976,7 @@ private function findCommissionAmount($itemCode, $supplierCode, $pricePerKg): fl
         }
     }
 
-    $amount = DefaultCommissions::forPrice($price);
-    if ($amount !== null) {
-        return $amount;
-    }
-
-    return $this->commissionFromTable($generalScope, $price) ?? 0.00;
+    return DefaultCommissions::forPrice($price) ?? 0.00;
 }
 
 /**
