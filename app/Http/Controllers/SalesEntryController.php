@@ -985,14 +985,20 @@ private function findCommissionAmount($itemCode, $supplierCode, $pricePerKg): fl
  */
 private function commissionFromTable(callable $scope, float $price): ?float
 {
-    $inBand = function ($query) use ($price) {
-        $query->where(function ($q) use ($price) {
-            $q->whereNull('starting_price')->orWhere('starting_price', '<=', $price);
-        })->where(function ($q) use ($price) {
-            $q->whereNull('end_price')
-                ->orWhere('end_price', '<=', 0)
-                ->orWhereColumn('end_price', '<', 'starting_price')
-                ->orWhere('end_price', '>=', floor($price));
+    // The live table stores prices as text, so compare as numbers explicitly:
+    // as text "300" <= "35" is true and 300-399 would match a price of 35.
+    $start = 'CAST(`starting_price` AS DECIMAL(12,2))';
+    $end = 'CAST(`end_price` AS DECIMAL(12,2))';
+
+    $inBand = function ($query) use ($price, $start, $end) {
+        $query->where(function ($q) use ($price, $start) {
+            $q->whereNull('starting_price')->orWhere('starting_price', '')
+                ->orWhereRaw("$start <= ?", [$price]);
+        })->where(function ($q) use ($price, $start, $end) {
+            $q->whereNull('end_price')->orWhere('end_price', '')
+                ->orWhereRaw("$end <= 0")
+                ->orWhereRaw("$end < $start")
+                ->orWhereRaw("$end >= ?", [floor($price)]);
         });
     };
 
@@ -1000,7 +1006,7 @@ private function commissionFromTable(callable $scope, float $price): ?float
         $rule = Commission::query()
             ->tap($scope)
             ->where($inBand)
-            ->orderByDesc('starting_price')
+            ->orderByRaw("$start DESC")
             ->first();
     } catch (\Throwable $e) {
         Log::warning('Commission table lookup failed, using built-in bands only: ' . $e->getMessage());
