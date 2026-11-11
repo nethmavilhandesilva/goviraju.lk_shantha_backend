@@ -18,6 +18,7 @@ use App\Models\Setting;
 use App\Models\CustomersLoan;
 use Illuminate\Http\JsonResponse;
 use App\Models\Commission;
+use App\Support\DefaultCommissions;
 use Illuminate\Support\Str;
 use Illuminate\Support\Facades\Cache;
 use Twilio\Rest\Client;
@@ -941,12 +942,20 @@ class SalesEntryController extends Controller
             return response()->json(['success' => false, 'message' => $e->getMessage()], 500);
         }
     }
- /**
- * Commission per kg for a sale price, from the commissions table.
- * Item rules win over supplier rules, which win over the general rules.
- * Rules are told apart by which codes are filled in (not the type column), a price
+/**
+ * Commission per kg for a sale price.
+ *
+ * Lookup order:
+ *   1. commissions table rule for this item code
+ *   2. commissions table rule for this supplier code
+ *   3. built-in default bands (App\Support\DefaultCommissions) - applied by default
+ *   4. commissions table general rules (no item/supplier) - only for prices the
+ *      built-in bands do not cover
+ *
+ * Table rules are told apart by which codes are filled in (not the type column), a price
  * between two bands (e.g. 9.50 between 1-9 and 10-19) uses the lower band, and an
- * empty or 0 end price means "and above".
+ * empty or 0 end price means "and above". If the table cannot be read the built-in
+ * bands are still used.
  */
 private function findCommissionAmount($itemCode, $supplierCode, $pricePerKg): float
 {
@@ -957,6 +966,31 @@ private function findCommissionAmount($itemCode, $supplierCode, $pricePerKg): fl
 
     $blank = fn ($column) => fn ($q) => $q->whereNull($column)->orWhere($column, '');
 
+    $itemScope = fn ($q) => $q->where('item_code', trim((string) $itemCode));
+    $supplierScope = fn ($q) => $q->where('supplier_code', trim((string) $supplierCode))->where($blank('item_code'));
+    $generalScope = fn ($q) => $q->where($blank('item_code'))->where($blank('supplier_code'));
+
+    foreach ([$itemScope, $supplierScope] as $scope) {
+        $amount = $this->commissionFromTable($scope, $price);
+        if ($amount !== null) {
+            return $amount;
+        }
+    }
+
+    $amount = DefaultCommissions::forPrice($price);
+    if ($amount !== null) {
+        return $amount;
+    }
+
+    return $this->commissionFromTable($generalScope, $price) ?? 0.00;
+}
+
+/**
+ * Commission from the first matching commissions-table rule within the scope,
+ * or null when nothing matches (or the table cannot be read).
+ */
+private function commissionFromTable(callable $scope, float $price): ?float
+{
     $inBand = function ($query) use ($price) {
         $query->where(function ($q) use ($price) {
             $q->whereNull('starting_price')->orWhere('starting_price', '<=', $price);
@@ -968,25 +1002,18 @@ private function findCommissionAmount($itemCode, $supplierCode, $pricePerKg): fl
         });
     };
 
-    $scopes = [
-        fn ($q) => $q->where('item_code', trim((string) $itemCode)),
-        fn ($q) => $q->where('supplier_code', trim((string) $supplierCode))->where($blank('item_code')),
-        fn ($q) => $q->where($blank('item_code'))->where($blank('supplier_code')),
-    ];
-
-    foreach ($scopes as $scope) {
+    try {
         $rule = Commission::query()
             ->tap($scope)
             ->where($inBand)
             ->orderByDesc('starting_price')
             ->first();
-
-        if ($rule) {
-            return (float) $rule->commission_amount;
-        }
+    } catch (\Throwable $e) {
+        Log::warning('Commission table lookup failed, using built-in bands only: ' . $e->getMessage());
+        return null;
     }
 
-    return 0.00;
+    return $rule ? (float) $rule->commission_amount : null;
 }
 
 private function calculateKuliya($itemCode, $itemName, $weight)
