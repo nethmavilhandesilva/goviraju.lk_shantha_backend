@@ -986,6 +986,12 @@ public function bulkUpdateSupplier(Request $request)
         $updatedCount = Sale::whereIn('id', $validated['transaction_ids'])
             ->update($updateData);
 
+        // A mass update skips model events, so re-apply the commission rules
+        // (a new supplier can fall under a different rule).
+        if (isset($updateData['supplier_code'])) {
+            Sale::recalculateCommissionFor($validated['transaction_ids']);
+        }
+
         return response()->json([
             'message' => 'ගනුදෙනු ' . $updatedCount . ' ක් යාවත්කාලීන කරන ලදී.',
             'updated_count' => $updatedCount
